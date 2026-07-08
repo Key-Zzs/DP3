@@ -118,6 +118,52 @@ N x 3 -> xyz point cloud, colored by z height
 N x 6 -> xyzrgb point cloud, RGB normalized from [0,1] or [0,255]
 ```
 
+## Debug Point-Cloud Stages
+
+Use these tools when the final zarr point cloud looks wrong and you need to
+inspect the exact preprocessing stages used by `export_lerobot_to_dp3_zarr.py`.
+Both scripts rebuild one frame through the same `PointCloudBuilder` path:
+raw depth deprojection, crop, then sampling. The Open3D window shows `raw`,
+`cropped`, and `sampled` point clouds side by side; each pane supports mouse
+rotate, pan, and zoom.
+
+Debug a frame from an exported zarr. This reads `source_lerobot_path`,
+`camera`, `pointcloud_mode`, `num_points`, and the stored
+`pointcloud_builder_config` from zarr attrs, then replays the source LeRobot
+RGB-D frame:
+
+```bash
+python tools/debug_zarr_pointcloud_stages.py \
+  --dp3-zarr data/flexiv_pick_place_head_xyzrgb.zarr \
+  --frame-index 0
+```
+
+By default, `debug_zarr_pointcloud_stages.py` uses the builder config snapshot
+stored inside `.zattrs`, so it reproduces the exported zarr even if the YAML file
+on disk has changed. To test the currently edited config, pass it explicitly:
+
+```bash
+python tools/debug_zarr_pointcloud_stages.py \
+  --dp3-zarr data/flexiv_pick_place_head_xyzrgb.zarr \
+  --frame-index 0 \
+  --builder-config third_party/real/flexiv-GN01/configs/data_rgb_config.yaml
+```
+
+Debug directly from a LeRobot dataset without reading zarr attrs:
+
+```bash
+python tools/debug_lerobot_pointcloud_stages.py \
+  --lerobot-path /home/deepcybo/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --frame-index 0 \
+  --camera head \
+  --pointcloud-mode xyzrgb \
+  --num-points 1024 \
+  --builder-config third_party/real/flexiv-GN01/configs/data_rgb_config.yaml
+```
+
+Add `--no-show` to print stage shapes and metadata without opening the Open3D
+GUI.
+
 ## DP3 zarr Structure
 
 The exported zarr has:

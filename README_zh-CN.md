@@ -112,6 +112,47 @@ N x 3 -> xyz 点云，按 z 高度着色
 N x 6 -> xyzrgb 点云，RGB 自动兼容 [0,1] 或 [0,255]
 ```
 
+## 调试点云处理阶段
+
+当最终 zarr 点云看起来不对，需要检查 `export_lerobot_to_dp3_zarr.py`
+实际使用的预处理阶段时，使用下面两个脚本。它们都会让指定帧走同一条
+`PointCloudBuilder` 路径：原始 depth 反投影、裁剪、采样。Open3D 大窗口会并排显示
+`raw`、`cropped`、`sampled` 三个点云视图，每个视图都支持鼠标旋转、平移和缩放。
+
+从已导出的 zarr 调试一帧。脚本会从 zarr attrs 读取
+`source_lerobot_path`、`camera`、`pointcloud_mode`、`num_points` 和保存的
+`pointcloud_builder_config`，再回放原始 LeRobot RGB-D 帧：
+
+```bash
+python tools/debug_zarr_pointcloud_stages.py \
+  --dp3-zarr data/flexiv_pick_place_head_xyzrgb.zarr \
+  --frame-index 0
+```
+
+默认情况下，`debug_zarr_pointcloud_stages.py` 会使用 `.zattrs` 中保存的 builder
+config 快照，因此即使磁盘上的 YAML 已经修改，也能复现导出当时的 zarr。若要测试当前正在编辑的配置，显式传入：
+
+```bash
+python tools/debug_zarr_pointcloud_stages.py \
+  --dp3-zarr data/flexiv_pick_place_head_xyzrgb.zarr \
+  --frame-index 0 \
+  --builder-config third_party/real/flexiv-GN01/configs/data_rgb_config.yaml
+```
+
+不读取 zarr attrs，直接从 LeRobot 数据集调试：
+
+```bash
+python tools/debug_lerobot_pointcloud_stages.py \
+  --lerobot-path /home/deepcybo/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --frame-index 0 \
+  --camera head \
+  --pointcloud-mode xyzrgb \
+  --num-points 1024 \
+  --builder-config third_party/real/flexiv-GN01/configs/data_rgb_config.yaml
+```
+
+加上 `--no-show` 可以只打印三阶段 shape 和 metadata，不打开 Open3D GUI。
+
 ## DP3 zarr 结构
 
 导出的 zarr 结构如下：
