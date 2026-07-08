@@ -59,7 +59,7 @@
 | `3D-Diffusion-Policy/diffusion_policy_3d/env_runner/` | 评估 runner | rollout、policy inference、环境 step、指标和视频 | 是 | 评估/推理调用链核心 |
 | `3D-Diffusion-Policy/diffusion_policy_3d/gym_util/` | 环境工具 | 多步 observation/action wrapper、点云生成、视频记录 | 是 | 动作 chunk 执行和点云坐标处理在这里 |
 | `visualizer/` | 小包 | Plotly/Flask 点云可视化 | 可选 | 用于调试点云，不参与训练 |
-| `third_party/` | 外部依赖 | DexArt、MetaWorld、mujoco_py、gym 等外部代码 | 本报告未深入 | 用户要求排除大型外部目录 |
+| `third_party/sim/` | 仿真外部依赖 | DexArt、MetaWorld、mujoco_py、gym 等外部代码 | 本报告未深入 | 用户要求排除大型外部目录 |
 
 ### 2.2 关键文件功能表
 
@@ -107,9 +107,9 @@
 | `diffusion_policy_3d/gym_util/video_recording_wrapper.py` | wrapper | rollout 视频帧记录 | 可选 | env_runner 上传 wandb |
 | `scripts/train_policy.sh` | shell | 封装训练命令 | 是 | 参数：算法、任务、附加名、seed、GPU |
 | `scripts/eval_policy.sh` | shell | 封装评估命令 | 是 | 存在变量未定义风险，见第 13 节 |
-| `scripts/gen_demonstration_adroit.sh` | shell | 调用 VRL3 生成 Adroit expert zarr | 可选 | 依赖 `third_party/VRL3` |
+| `scripts/gen_demonstration_adroit.sh` | shell | 调用 VRL3 生成 Adroit expert zarr | 可选 | 依赖 `third_party/sim/VRL3` |
 | `scripts/gen_demonstration_dexart.sh` | shell | 调用 DexArt expert 生成示范 | 可选 | 依赖 DexArt assets 和 checkpoint |
-| `scripts/gen_demonstration_metaworld.sh` | shell | 调用 MetaWorld expert 生成示范 | 可选 | 依赖 `third_party/Metaworld` |
+| `scripts/gen_demonstration_metaworld.sh` | shell | 调用 MetaWorld expert 生成示范 | 可选 | 依赖 `third_party/sim/Metaworld` |
 | `scripts/convert_real_robot_data.py` | Python | 真实机器人 pickle 数据转 zarr 示例 | 可选 | 路径硬编码，不是通用 CLI |
 | `scripts/find_gpu.sh` | shell | 用 `nvidia-smi` 选显存占用最小 GPU | 可选 | 当前 `train_policy.sh` 注释掉了自动调用 |
 | `visualizer/visualizer/pointcloud.py` | 工具 | Plotly/Flask 点云可视化 | 可选 | 暴露 `visualize_pointcloud()` 和 `Visualizer` |
@@ -532,9 +532,9 @@ Adroit 和 DexArt 的区别：
 
 | 脚本 | 调用外部文件 | 输出位置 | 说明 |
 | --- | --- | --- | --- |
-| `scripts/gen_demonstration_adroit.sh` | `third_party/VRL3/src/gen_demonstration_expert.py` | `3D-Diffusion-Policy/data/` | 生成 Adroit 示范，默认 10 episodes |
-| `scripts/gen_demonstration_dexart.sh` | `third_party/dexart-release/examples/gen_demonstration_expert.py` | `3D-Diffusion-Policy/data/` | 生成 DexArt 示范，默认 100 episodes |
-| `scripts/gen_demonstration_metaworld.sh` | `third_party/Metaworld/gen_demonstration_expert.py` | `3D-Diffusion-Policy/data/` | 生成 MetaWorld 示范 |
+| `scripts/gen_demonstration_adroit.sh` | `third_party/sim/VRL3/src/gen_demonstration_expert.py` | `3D-Diffusion-Policy/data/` | 生成 Adroit 示范，默认 10 episodes |
+| `scripts/gen_demonstration_dexart.sh` | `third_party/sim/dexart-release/examples/gen_demonstration_expert.py` | `3D-Diffusion-Policy/data/` | 生成 DexArt 示范，默认 100 episodes |
+| `scripts/gen_demonstration_metaworld.sh` | `third_party/sim/Metaworld/gen_demonstration_expert.py` | `3D-Diffusion-Policy/data/` | 生成 MetaWorld 示范 |
 
 这些脚本依赖 `third_party` 和外部资产/专家 checkpoint，本报告按要求没有深入 `third_party`。
 
@@ -801,9 +801,9 @@ bash scripts/gen_demonstration_metaworld.sh basketball
 
 这些命令要求：
 
-- `third_party/VRL3` 下有 Adroit expert ckpt。
-- `third_party/dexart-release/assets` 和 RL checkpoint 已准备。
-- `third_party/Metaworld` 安装正常。
+- `third_party/sim/VRL3` 下有 Adroit expert ckpt。
+- `third_party/sim/dexart-release/assets` 和 RL checkpoint 已准备。
+- `third_party/sim/Metaworld` 安装正常。
 
 数据最终应放在 task yaml 指定的路径，例如：
 

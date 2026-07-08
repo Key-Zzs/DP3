@@ -4,11 +4,11 @@
 # bash scripts/gen_demonstration_dexart.sh toilet
 
 
-cd third_party/dexart-release
+cd third_party/sim/dexart-release
 
 task_name=${1}
 num_episodes=100
-root_dir=../../3D-Diffusion-Policy/data/
+root_dir=../../../3D-Diffusion-Policy/data/
 
 CUDA_VISIBLE_DEVICES=2 python examples/gen_demonstration_expert.py --task_name=${task_name} \
             --checkpoint_path assets/rl_checkpoints/${task_name}/${task_name}_nopretrain_0.zip \

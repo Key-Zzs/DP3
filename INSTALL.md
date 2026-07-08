@@ -9,7 +9,7 @@ First, git clone this repo and `cd` into it.
 
 **Please strictly follow the guidance to avoid any potential errors. Especially, make sure Gym version is the same.**
 
-**Don't worry about the gym version now. Just install my version in `third_party/gym-0.21.0` and you will be fine.**
+**Don't worry about the gym version now. Just install my version in `third_party/sim/gym-0.21.0` and you will be fine.**
 
 ---
 
@@ -53,12 +53,12 @@ and put the following into your bash script (usually in `YOUR_HOME_PATH/.bashrc`
     export MUJOCO_GL=egl
 
 
-and then install mujoco-py (in the folder of `third_party`):
+and then install mujoco-py (in the folder of `third_party/sim`):
 
-    cd YOUR_PATH_TO_THIRD_PARTY
+    cd YOUR_PATH_TO_REPO/third_party/sim
     cd mujoco-py-2.1.2.14
     pip install -e .
-    cd ../..
+    cd ../../..
 
 
 ----
@@ -67,21 +67,21 @@ and then install mujoco-py (in the folder of `third_party`):
 
     pip install setuptools==59.5.0 Cython==0.29.35 patchelf==0.17.2.0
 
-    cd third_party
+    cd third_party/sim
     cd dexart-release && pip install -e . && cd ..
     cd gym-0.21.0 && pip install -e . && cd ..
     cd Metaworld && pip install -e . && cd ..
     cd rrl-dependencies && pip install -e mj_envs/. && pip install -e mjrl/. && cd ..
 
-download assets from [Google Drive](https://drive.google.com/file/d/1DxRfB4087PeM3Aejd6cR-RQVgOKdNrL4/view?usp=sharing), unzip it, and put it in `third_party/dexart-release/assets`. 
+download assets from [Google Drive](https://drive.google.com/file/d/1DxRfB4087PeM3Aejd6cR-RQVgOKdNrL4/view?usp=sharing), unzip it, and put it in `third_party/sim/dexart-release/assets`.
 
-download Adroit RL experts from [OneDrive](https://1drv.ms/u/s!Ag5QsBIFtRnTlFWqYWtS2wMMPKNX?e=dw8hsS), unzip it, and put the `ckpts` folder under `$YOUR_REPO_PATH/third_party/VRL3/`.
+download Adroit RL experts from [OneDrive](https://1drv.ms/u/s!Ag5QsBIFtRnTlFWqYWtS2wMMPKNX?e=dw8hsS), unzip it, and put the `ckpts` folder under `$YOUR_REPO_PATH/third_party/sim/VRL3/`.
 
 ---
 
 6.install pytorch3d (a simplified version)
 
-    cd third_party/pytorch3d_simplified && pip install -e . && cd ..
+    cd third_party/sim/pytorch3d_simplified && pip install -e . && cd ../..
 
 
 ---
@@ -97,4 +97,3 @@ download Adroit RL experts from [OneDrive](https://1drv.ms/u/s!Ag5QsBIFtRnTlFWqY
 
     pip install kaleido plotly
     cd visualizer && pip install -e . && cd ..
-

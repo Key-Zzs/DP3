@@ -60,18 +60,18 @@ sudo apt-get install libglew-dev
 this occurs when using the functions from pytorch3d. reinstalling pytorch3d would solve the problem.
 ```
 pip uninstall pytorch3d
-cd third_party/pytorch3d
+cd third_party/sim/pytorch3d_simplified
 pip install -e .
-cd ../..
+cd ../../..
 ```
 
 
-- ImportError: cannot import name '_C' from 'pytorch3d' (/home/yanjieze/projects/diffusion-policy-for-dex/third_party/pytorch3d/pytorch3d/__init__.py)
+- ImportError: cannot import name '_C' from 'pytorch3d' (/home/yanjieze/projects/diffusion-policy-for-dex/third_party/sim/pytorch3d_simplified/pytorch3d/__init__.py)
 ```
 pip uninstall pytorch3d
-cd third_party/pytorch3d
+cd third_party/sim/pytorch3d_simplified
 pip install -e .
-cd ../..
+cd ../../..
 ```
 
 - wandb video error:
@@ -101,7 +101,7 @@ check by:
 strings /usr/lib/arm-linux-gnueabihf/libstdc++.so.6 | grep GLIBCXX
 ```
 
-- installing the third_party/gym-0.21.0 package when running with pip==24, leading to the following error:
+- installing the third_party/sim/gym-0.21.0 package when running with pip==24, leading to the following error:
 ```
   Preparing metadata (setup.py) ... error
   error: subprocess-exited-with-error
@@ -134,11 +134,11 @@ This is because only huggingface_hub lower than 0.26 supports cached_download, t
 
 - Error:
 
-        ERROR: Requested gym==0.21.0 from file:///~/3D-Diffusion-Policy/third_party/gym-0.21.0 has invalid metadata: Expected end or semicolon (after version specifier)
+        ERROR: Requested gym==0.21.0 from file:///~/3D-Diffusion-Policy/third_party/sim/gym-0.21.0 has invalid metadata: Expected end or semicolon (after version specifier)
             opencv-python>=3.
                          ~~~^
 
-This is because no specific opencv-python version, go to 3D-Diffusion-Policy/third_party/gym-0.21.0/setup.py and line 20, add 0 at the end of opencv-python>=3. just like this [issue](https://github.com/YanjieZe/3D-Diffusion-Policy/issues/92)
+This is because no specific opencv-python version, go to 3D-Diffusion-Policy/third_party/sim/gym-0.21.0/setup.py and line 20, add 0 at the end of opencv-python>=3. just like this [issue](https://github.com/YanjieZe/3D-Diffusion-Policy/issues/92)
 
 - Error: python -m train ... Fails with PathNotFoundError Due to Incorrect Current Working Directory.
 
