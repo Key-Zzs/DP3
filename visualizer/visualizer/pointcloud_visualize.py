@@ -1,0 +1,2 @@
+import visualizer
+visualizer.visualize_pointcloud(pointcloud)

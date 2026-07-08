@@ -1,8 +1,13 @@
+.vscode/
+.codex/
+.agents/
+
 # python related
 *.egg-info/
 *.pyc
 .DS_Store
 __pycache__/
+.pytest_cache/
 scripts/plot/pdfs/
 videos/
 run_3seed.sh
@@ -44,3 +49,6 @@ personal_TASK.md
 easytrain.sh
 nohup.out
 output/
+
+# tar files
+*.tar.gz
