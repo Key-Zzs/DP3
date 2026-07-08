@@ -1,0 +1,38 @@
+camera:
+  name: head
+  aligned_depth_to_color: false
+  depth_scale: 0.0010000000474974513
+  depth_intrinsics:
+    width: 640
+    height: 480
+    fx: 392.5011901855469
+    fy: 392.5011901855469
+    cx: 316.7951354980469
+    cy: 235.7994384765625
+  color_intrinsics:
+    width: 640
+    height: 480
+    fx: 606.177490234375
+    fy: 606.6356201171875
+    cx: 320.8212585449219
+    cy: 256.06561279296875
+
+pointcloud:
+  use_rgb: false
+  output_format: xyz
+
+crop:
+  enabled: true
+  frame: camera
+  x: [-0.5, 0.5]
+  y: [-0.2, 0.5]
+  z: [0.05, 1.2]
+
+sampling:
+  enabled: true
+  mode: random
+  num_points: 1024
+  voxel_size: 0.01
+  pad_mode: repeat
+  deterministic: true
+  seed: 42
