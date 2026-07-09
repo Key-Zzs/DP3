@@ -37,15 +37,36 @@ cd /home/deepcybo/workspace/3D-Diffusion-Policy
 export PYTHONPATH=$PWD/PointCloudBuilder:$PWD/3D-Diffusion-Policy:$PYTHONPATH
 ```
 
+## Default Output Path
+
+If `--output-zarr` is omitted, the exporter writes to:
+
+```text
+/home/deepcybo/.cache/dp3_zarr/<lerobot_repo_id>_<camera>_<pointcloud-mode>.zarr
+```
+
+The script first reads `repo_id` from `meta/info.json`. If the local dataset
+does not store `repo_id`, it falls back to the path relative to
+`/home/deepcybo/.cache/huggingface/lerobot`. Path separators and unsupported
+filename characters in the repo id are replaced with `_`.
+
+For the example dataset below, the default `xyz` output is:
+
+```text
+/home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
+```
+
+Pass `--output-zarr` only when you need to override this location.
+
 ## Export xyz
 
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path /home/deepcybo/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
-  --output-zarr data/flexiv_pick_place_head_xyz.zarr \
   --camera head \
   --pointcloud-mode xyz \
   --num-points 1024 \
+  --builder-config /home/deepcybo/workspace/3D-Diffusion-Policy/third_party/real/flexiv-GN01/configs/data_config.yaml \
   --overwrite
 ```
 
@@ -54,10 +75,10 @@ python tools/export_lerobot_to_dp3_zarr.py \
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path /home/deepcybo/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
-  --output-zarr data/flexiv_pick_place_head_xyzrgb.zarr \
   --camera head \
   --pointcloud-mode xyzrgb \
   --num-points 1024 \
+  --builder-config /home/deepcybo/workspace/3D-Diffusion-Policy/third_party/real/flexiv-GN01/configs/data_config.yaml \
   --overwrite
 ```
 
@@ -70,7 +91,7 @@ depth intrinsics, color intrinsics, depth scale, and for `xyzrgb` the
 
 ```bash
 python tools/inspect_dp3_zarr.py \
-  --zarr-path data/flexiv_pick_place_head_xyz.zarr
+  --zarr-path /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
 ```
 
 The inspector checks `data/state`, `data/action`, `data/point_cloud`, and
@@ -90,7 +111,7 @@ Visualize one frame from the zarr root:
 
 ```bash
 python visualizer/visualizer/visualize_zarr_pointcloud.py \
-  --zarr-path /home/deepcybo/workspace/3D-Diffusion-Policy/data/flexiv_pick_place_head_xyz.zarr \
+  --zarr-path /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr \
   --frame 0
 ```
 
@@ -98,7 +119,7 @@ Visualize one frame from the direct point-cloud array:
 
 ```bash
 python visualizer/visualizer/visualize_zarr_pointcloud.py \
-  --zarr-path /home/deepcybo/workspace/3D-Diffusion-Policy/data/flexiv_pick_place_head_xyz.zarr/data/point_cloud \
+  --zarr-path /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr/data/point_cloud \
   --frame 0
 ```
 
@@ -134,7 +155,7 @@ RGB-D frame:
 
 ```bash
 python tools/debug_zarr_pointcloud_stages.py \
-  --dp3-zarr data/flexiv_pick_place_head_xyzrgb.zarr \
+  --dp3-zarr /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
   --frame-index 0
 ```
 
@@ -144,7 +165,7 @@ on disk has changed. To test the currently edited config, pass it explicitly:
 
 ```bash
 python tools/debug_zarr_pointcloud_stages.py \
-  --dp3-zarr data/flexiv_pick_place_head_xyzrgb.zarr \
+  --dp3-zarr /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
   --frame-index 0 \
   --builder-config third_party/real/flexiv-GN01/configs/data_rgb_config.yaml
 ```

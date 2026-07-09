@@ -109,6 +109,29 @@ def test_compute_episode_ends_from_indices() -> None:
     assert ends.tolist() == [3, 5, 6]
 
 
+def test_default_output_zarr_path_uses_sanitized_repo_id(tmp_path) -> None:
+    output = exporter.default_output_zarr_path(
+        tmp_path / "dataset",
+        {"repo_id": "owner/my dataset"},
+        camera="head",
+        pointcloud_mode="xyzrgb",
+        output_root=tmp_path,
+    )
+    assert output == tmp_path / "owner_my_dataset_head_xyzrgb.zarr"
+
+
+def test_default_output_zarr_path_falls_back_to_lerobot_cache_relative(tmp_path) -> None:
+    lerobot_path = Path.home() / ".cache" / "huggingface" / "lerobot" / "org" / "dataset"
+    output = exporter.default_output_zarr_path(
+        lerobot_path,
+        {},
+        camera="left_wrist",
+        pointcloud_mode="xyz",
+        output_root=tmp_path,
+    )
+    assert output == tmp_path / "org_dataset_left_wrist_xyz.zarr"
+
+
 def test_write_dp3_zarr_xyz_and_overwrite(tmp_path) -> None:
     zarr = pytest.importorskip("zarr")
     assert zarr is not None

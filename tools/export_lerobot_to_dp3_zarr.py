@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from collections.abc import Iterator
@@ -43,6 +44,8 @@ STATE_COLUMN = "observation.state"
 ACTION_COLUMN = "action"
 STATE_DIM = 28
 ACTION_DIM = 14
+DEFAULT_OUTPUT_ROOT = Path.home() / ".cache" / "dp3_zarr"
+LEROBOT_CACHE_ROOT = Path.home() / ".cache" / "huggingface" / "lerobot"
 
 
 def build_pointcloud_builder_config(
@@ -185,6 +188,21 @@ def write_dp3_zarr(
         arrays["img"][:] = img.astype(np.uint8, copy=False)
 
 
+def default_output_zarr_path(
+    lerobot_path: str | Path,
+    info: dict[str, Any],
+    *,
+    camera: str,
+    pointcloud_mode: str,
+    output_root: str | Path = DEFAULT_OUTPUT_ROOT,
+) -> Path:
+    """Return the default DP3 zarr path for a LeRobot dataset export."""
+
+    repo_id = _lerobot_repo_id(lerobot_path, info)
+    filename = f"{_safe_filename_component(repo_id)}_{camera}_{pointcloud_mode}.zarr"
+    return Path(output_root).expanduser() / filename
+
+
 def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
     lerobot_arg = Path(args.lerobot_path).expanduser()
     if not lerobot_arg.is_absolute():
@@ -195,7 +213,8 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
     if args.num_points <= 0:
         raise ValueError("--num-points must be positive")
 
-    output_zarr = Path(args.output_zarr).expanduser()
+    info = _read_json(lerobot_path / "meta" / "info.json")
+    output_zarr = _resolve_output_zarr(args, lerobot_path=lerobot_path, info=info)
     data_paths = _data_parquet_paths(lerobot_path)
     total_frames = _count_parquet_rows(data_paths)
     episode_rows = _read_episode_rows(lerobot_path)
@@ -206,7 +225,6 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
     )
     frames_to_export = int(episode_ends[-1])
 
-    info = _read_json(lerobot_path / "meta" / "info.json")
     realsense_calibration = _read_json(lerobot_path / "meta" / "realsense_calibration.json")
     builder_config_path, builder_config = _resolve_builder_config(
         args=args,
@@ -402,6 +420,22 @@ def _resolve_builder_config(
     with config_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, sort_keys=False)
     return config_path.resolve(), config
+
+
+def _resolve_output_zarr(
+    args: argparse.Namespace,
+    *,
+    lerobot_path: Path,
+    info: dict[str, Any],
+) -> Path:
+    if args.output_zarr:
+        return Path(args.output_zarr).expanduser()
+    return default_output_zarr_path(
+        lerobot_path,
+        info,
+        camera=args.camera,
+        pointcloud_mode=args.pointcloud_mode,
+    )
 
 
 def _create_output_arrays(
@@ -694,6 +728,25 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _lerobot_repo_id(lerobot_path: str | Path, info: dict[str, Any]) -> str:
+    repo_id = info.get("repo_id")
+    if isinstance(repo_id, str) and repo_id.strip():
+        return repo_id.strip()
+
+    path = Path(lerobot_path).expanduser().resolve()
+    try:
+        return path.relative_to(LEROBOT_CACHE_ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _safe_filename_component(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._-")
+    if not safe:
+        raise ValueError("LeRobot repo_id produced an empty output filename component")
+    return safe
+
+
 def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
@@ -732,7 +785,13 @@ def _print_failure_diagnostics(args: argparse.Namespace, exc: BaseException) -> 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lerobot-path", required=True, help="Absolute path to a local LeRobot dataset")
-    parser.add_argument("--output-zarr", required=True, help="Output DP3 zarr path")
+    parser.add_argument(
+        "--output-zarr",
+        help=(
+            "Output DP3 zarr path. Defaults to "
+            f"{DEFAULT_OUTPUT_ROOT}/<lerobot_repo_id>_<camera>_<pointcloud-mode>.zarr"
+        ),
+    )
     parser.add_argument("--camera", choices=sorted(CAMERA_SPECS), default="head")
     parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default="xyz")
     parser.add_argument("--num-points", type=int, default=1024)
