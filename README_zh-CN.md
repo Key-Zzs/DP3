@@ -233,7 +233,7 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
 参数格式：
 
 ```text
-<xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...]
+<xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...] [--overwrite]
 ```
 
 默认 checkpoint 输出到当前仓库内的相对路径：
@@ -242,7 +242,11 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
 outputs/<exp_name>_seed<seed>/checkpoints/
 ```
 
-如需覆盖整个 Hydra 输出目录，设置 `RUN_DIR=/custom/output/dir`。常用环境变量包括
+如需指定整个 Hydra 输出目录，设置 `RUN_DIR=/custom/output/dir`。如果目标输出目录已经存在，
+训练封装脚本默认会报错退出，避免旧 checkpoint、Hydra 配置和 WandB 文件与新训练混在一起。
+只有显式添加 `--overwrite` 时，脚本才会先删除整个目标输出目录再开始训练。
+
+常用环境变量包括
 `SAVE_CKPT=True|False`、`WANDB_MODE=offline|online|disabled`、`BATCH_SIZE`、
 `NUM_WORKERS`、`MAX_TRAIN_EPISODES` 和 `EXP_NAME`。
 

@@ -96,14 +96,14 @@
 | `training.device` | `cuda:0` | `cuda:0` | 训练设备。脚本里还会设置 `CUDA_VISIBLE_DEVICES`。 | 多卡时脚本参数的 GPU id 和这里的 `cuda:0` 配合使用。 |
 | `training.seed` | `42` | `42` | PyTorch、NumPy、random 随机种子。 | 做对比实验时只改一个超参并固定 seed；最终可多 seed 验证。 |
 | `training.debug` | `False` | `False` | `True` 时 train.py 会强制缩短训练：`num_epochs=100,max_train_steps=10,max_val_steps=3,checkpoint_every=1,sample_every=1` 等。 | smoke test 用 `True`；正式训练用 `False`。 |
-| `training.resume` | `True` | `True` | 启动时尝试从输出目录下 latest checkpoint 恢复。 | 同一个 `hydra.run.dir` 复跑会自动续训；想从头训练要换目录或关掉 resume。 |
+| `training.resume` | `True` | `False` | 启动时是否尝试从输出目录下 `latest.ckpt` 恢复。 | `simple_dp3` 当前默认从头训练；训练脚本还会在输出目录已存在时默认报错，避免新旧文件混在一起。 |
 | `training.lr_scheduler` | `cosine` | `cosine` | 使用 diffusers 的学习率调度器。 | 默认余弦退火。短训练可试 `constant_with_warmup`，但需保持 warmup 设置。 |
-| `training.lr_warmup_steps` | `500` | `500` | 学习率 warmup 步数。 | 小数据/短训练时可降到 `50/100`，否则 500 可能占比过高。 |
-| `training.num_epochs` | `3000` | `3000` | epoch 数。 | zarr episode 少时 epoch 可以多，但要看 `global_step` 和 loss 曲线，不只看 epoch。 |
+| `training.lr_warmup_steps` | `500` | `50` | 学习率 warmup 步数。 | 小数据/短训练时可降到 `50/100`，否则 500 可能占比过高。 |
+| `training.num_epochs` | `3000` | `600` | epoch 数。 | zarr episode 少时 epoch 可以多，但要看 `global_step` 和 loss 曲线，不只看 epoch。 |
 | `training.gradient_accumulate_every` | `1` | `1` | 梯度累积步数。train.py 中用它缩放 loss，并按 global step 间隔执行 optimizer step。 | 显存不够时先降 batch；需要保持等效 batch 时再增大该值。注意当前实现从 `global_step=0` 就 step，一般保持 `1` 最少出问题。 |
 | `training.use_ema` | `True` | `True` | 训练时维护 EMA policy，评估和 sample 用 EMA。 | 默认开启。 |
 | `training.rollout_every` | `200` | `200` | 每多少 epoch 跑 env rollout。 | Flexiv 真实 task 的 `env_runner: null`，不会跑仿真 rollout。 |
-| `training.checkpoint_every` | `200` | `200` | 每多少 epoch 检查保存 checkpoint。 | 配合 `checkpoint.save_ckpt` 才生效。 |
+| `training.checkpoint_every` | `200` | `200` | 每多少 epoch 检查保存 checkpoint。 | 配合 `checkpoint.save_ckpt` 才生效；如果要按步数保存，需要先换算成 epoch 或改训练循环。 |
 | `training.val_every` | `1` | `1` | 每多少 epoch 跑 validation。 | 当前 train.py 里 `RUN_VALIDATION = False`，所以默认不会实际跑 validation。 |
 | `training.sample_every` | `5` | `5` | 每多少 epoch 在训练 batch 上采样动作并记录 `train_action_mse_error`。 | 调扩散采样质量时关注该指标，但它不是闭环成功率。 |
 | `training.max_train_steps` | `null` | `null` | 每个 epoch 最多训练多少 batch。 | smoke test 可设小，例如 `10/20`；正式训练保持 `null`。 |
@@ -130,11 +130,13 @@
 | `checkpoint.topk.monitor_key` | `test_mean_score` | `test_mean_score` | TopK 保存依据。真实 Flexiv task 无 env_runner 时，train.py 会把它设为 `-train_loss`。 | 真实训练时 TopK 近似按训练 loss 选，不代表真实闭环效果。 |
 | `checkpoint.topk.mode` | `max` | `max` | TopK 方向。 | 对 `test_mean_score=-train_loss` 来说 `max` 等价于 loss 越低越好。 |
 | `checkpoint.topk.k` | `1` | `1` | 保留 top-k 数量。 | 想保留更多候选可设 `3/5`。 |
-| `checkpoint.save_last_ckpt` | `True` | `True` | 保存 `latest.ckpt`。仅当 `save_ckpt=True` 生效。 | 正式训练保持开启。 |
+| `checkpoint.save_last_ckpt` | `True` | `True` | 保存并覆盖 `checkpoints/latest.ckpt`。仅当 `save_ckpt=True` 生效。 | 正式训练保持开启，方便 resume 或找最近一次权重。 |
+| `checkpoint.save_every_ckpt` | `True` | `True` | 每次 `checkpoint_every` 触发时，额外保留一个独立 ckpt 文件，不受 top-k 删除逻辑影响。 | 想保留周期历史 ckpt 时保持开启；磁盘紧张时设为 `False`。 |
+| `checkpoint.save_every_ckpt_format_str` | `epoch={epoch:04d}-global_step={global_step}.ckpt` | 同左 | 周期历史 ckpt 的文件名模板。可使用 `epoch`、`global_step`、`train_loss`、`test_mean_score` 等当前日志字段。 | 建议默认即可，避免与 top-k 文件名冲突。 |
 | `checkpoint.save_last_snapshot` | `False` | `False` | 保存完整 Python snapshot。 | 一般不需要，代码兼容性要求更高。 |
 | `multi_run.run_dir` | `data/outputs/...` | `data/outputs/...` | Hydra sweep 输出目录模板。 | 脚本可用 `RUN_DIR` 覆盖。 |
 | `multi_run.wandb_name_base` | 时间戳模板 | 时间戳模板 | 多实验 WandB 名称基础。 | 只影响记录。 |
-| `hydra.run.dir` | `data/outputs/...` | `data/outputs/...` | 单次运行输出目录。 | 复现实验时显式指定，避免自动时间戳导致 checkpoint 不易找。 |
+| `hydra.run.dir` | `data/outputs/...` | `data/outputs/...` | 单次运行输出目录。训练脚本默认覆盖为 `3D-Diffusion-Policy/outputs/<exp_name>_seed<seed>`。 | 复现实验时显式指定；通过训练脚本启动时，已有目录会默认报错，只有加 `--overwrite` 才会先删除整个目录。 |
 | `hydra.sweep.dir/subdir` | 时间戳 + job num | 同左 | sweep 输出组织方式。 | 批量扫参时保留默认即可。 |
 
 ## Flexiv 双臂训练时的调参方法
@@ -148,7 +150,7 @@
    bash scripts/train_flexiv_dual_arm_dp3.sh xyzrgb /path/to/data.zarr simple_dp3 0 42
    ```
 
-   该脚本会按 `xyz/xyzrgb` 自动覆盖 `task`、`policy.use_pc_color` 和 `policy.pointcloud_encoder_cfg.in_channels`。
+   该脚本会按 `xyz/xyzrgb` 自动覆盖 `task`、`policy.use_pc_color` 和 `policy.pointcloud_encoder_cfg.in_channels`。如果目标输出目录已存在，脚本会默认报错；要重用同名目录并清空旧文件，显式追加 `--overwrite`。
 
 2. 先用 `simple_dp3` 做 smoke test。
 
@@ -159,7 +161,7 @@
    bash scripts/train_flexiv_dual_arm_dp3.sh xyz /path/to/data.zarr simple_dp3 0 42
    ```
 
-   smoke test 通过后再关 `DEBUG`，并显式设置输出目录，避免 `resume=True` 误接旧实验。
+   smoke test 通过后再关 `DEBUG`，并显式设置新的输出目录；如果确实要覆盖旧目录，使用 `--overwrite`，它会删除整个 Hydra 输出目录后再训练。
 
 3. 按显存预算调容量。
 
@@ -195,10 +197,10 @@
    `dp3.yaml` 默认 `checkpoint.save_ckpt=False`，正式训练应开启。脚本默认 `SAVE_CKPT=True`，但如果直接跑 `python train.py --config-name=dp3.yaml`，要手动加：
 
    ```bash
-   checkpoint.save_ckpt=True checkpoint.save_last_ckpt=True
+   checkpoint.save_ckpt=True checkpoint.save_last_ckpt=True checkpoint.save_every_ckpt=True
    ```
 
-   `training.resume=True` 会从当前输出目录找 latest checkpoint。想从头跑新实验，最好换 `hydra.run.dir` 或设 `training.resume=False`。
+   `training.resume=True` 会从当前输出目录找 `latest.ckpt`。`checkpoint.save_every_ckpt=True` 会额外保留类似 `epoch=0200-global_step=12345.ckpt` 的周期历史文件；这条路径不经过 top-k，不会被 `checkpoint.topk.k=1` 删除。通过训练脚本启动时，想从头跑新实验最好换 `RUN_DIR`/`EXP_NAME`；显式加 `--overwrite` 时会删除整个目标输出目录，避免残留旧 ckpt。
 
 8. 不建议优先调的参数。
 

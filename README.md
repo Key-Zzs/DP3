@@ -248,7 +248,7 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
 Arguments are:
 
 ```text
-<xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...]
+<xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...] [--overwrite]
 ```
 
 By default, checkpoints are written to this repository-relative path:
@@ -258,6 +258,11 @@ outputs/<exp_name>_seed<seed>/checkpoints/
 ```
 
 Set `RUN_DIR=/custom/output/dir` to override the whole Hydra output directory.
+If the target output directory already exists, the wrapper aborts by default to
+avoid mixing old checkpoints, Hydra configs, and WandB files with a new run. Add
+`--overwrite` only when you want to delete the entire target output directory
+before training starts.
+
 Useful environment overrides include `SAVE_CKPT=True|False`,
 `WANDB_MODE=offline|online|disabled`, `BATCH_SIZE`, `NUM_WORKERS`,
 `MAX_TRAIN_EPISODES`, and `EXP_NAME`.

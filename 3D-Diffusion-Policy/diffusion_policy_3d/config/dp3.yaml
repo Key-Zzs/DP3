@@ -132,7 +132,9 @@ checkpoint:
     mode: max
     k: 1
     format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
-  save_last_ckpt: True # this only saves when save_ckpt is True
+  save_last_ckpt: True # overwrite checkpoints/latest.ckpt every checkpoint_every
+  save_every_ckpt: True # keep a separate checkpoint every checkpoint_every, independent of topk
+  save_every_ckpt_format_str: 'epoch={epoch:04d}-global_step={global_step}.ckpt'
   save_last_snapshot: False
 
 multi_run:

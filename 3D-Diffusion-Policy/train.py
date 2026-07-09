@@ -305,17 +305,26 @@ class TrainDP3Workspace:
             # checkpoint
             if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
                 # checkpointing
-                if cfg.checkpoint.save_last_ckpt:
-                    self.save_checkpoint()
-                if cfg.checkpoint.save_last_snapshot:
-                    self.save_snapshot()
-
-                # sanitize metric names
+                # sanitize metric names once so all checkpoint filename formats can reuse them
                 metric_dict = dict()
                 for key, value in step_log.items():
                     new_key = key.replace('/', '_')
                     metric_dict[new_key] = value
-                
+
+                if cfg.checkpoint.save_last_ckpt:
+                    self.save_checkpoint()
+                if cfg.checkpoint.get('save_every_ckpt', False):
+                    format_str = cfg.checkpoint.get(
+                        'save_every_ckpt_format_str',
+                        'epoch={epoch:04d}-global_step={global_step}.ckpt'
+                    )
+                    save_every_ckpt_path = pathlib.Path(self.output_dir).joinpath(
+                        'checkpoints', format_str.format(**metric_dict)
+                    )
+                    self.save_checkpoint(path=save_every_ckpt_path)
+                if cfg.checkpoint.save_last_snapshot:
+                    self.save_snapshot()
+
                 # We can't copy the last checkpoint here
                 # since save_checkpoint uses threads.
                 # therefore at this point the file might have been empty!

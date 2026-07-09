@@ -146,6 +146,11 @@ is this repository-relative path:
 outputs/<exp_name>_seed<seed>/checkpoints/
 ```
 
+The wrapper refuses to start if the target output directory already exists.
+Use a different `RUN_DIR`/`EXP_NAME`, or add `--overwrite` to delete the entire
+target output directory before training. This avoids ambiguous leftover
+checkpoints from an older run.
+
 `train.py` changes its working directory during startup, so prefer absolute
 `zarr_path` values.
 
