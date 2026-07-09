@@ -48,7 +48,7 @@ dexdeform_demonstrations.zip
 personal_TASK.md
 easytrain.sh
 nohup.out
-output/
+outputs/
 
 # tar files
 *.tar.gz

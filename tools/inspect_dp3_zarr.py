@@ -14,7 +14,14 @@ import numpy as np
 REQUIRED_DATA_KEYS = ["state", "action", "point_cloud"]
 
 
-def inspect_dp3_zarr(zarr_path: str | Path) -> dict[str, Any]:
+def inspect_dp3_zarr(
+    zarr_path: str | Path,
+    *,
+    expected_state_dim: int | None = None,
+    expected_action_dim: int | None = None,
+    expected_pointcloud_dim: int | None = None,
+    expected_num_points: int | None = None,
+) -> dict[str, Any]:
     try:
         import zarr
     except ImportError as exc:
@@ -43,11 +50,35 @@ def inspect_dp3_zarr(zarr_path: str | Path) -> dict[str, Any]:
     episode_ends = meta["episode_ends"][:]
     if point_cloud.ndim != 3:
         raise ValueError(f"data/point_cloud must be T x N x C, got {point_cloud.shape}")
+    if state.ndim != 2:
+        raise ValueError(f"data/state must be T x D, got {state.shape}")
+    if action.ndim != 2:
+        raise ValueError(f"data/action must be T x D, got {action.shape}")
+    if int(action.shape[0]) != int(state.shape[0]):
+        raise ValueError(
+            f"data/action length {action.shape[0]} does not equal T ({state.shape[0]})"
+        )
+    if int(point_cloud.shape[0]) != int(state.shape[0]):
+        raise ValueError(
+            f"data/point_cloud length {point_cloud.shape[0]} does not equal T ({state.shape[0]})"
+        )
     if not np.all(np.diff(episode_ends) > 0):
         raise ValueError("meta/episode_ends must be strictly increasing")
     if int(episode_ends[-1]) != int(state.shape[0]):
         raise ValueError(
             f"episode_ends[-1] ({episode_ends[-1]}) does not equal T ({state.shape[0]})"
+        )
+    if expected_state_dim is not None and int(state.shape[1]) != int(expected_state_dim):
+        raise ValueError(f"data/state dim {state.shape[1]} != {expected_state_dim}")
+    if expected_action_dim is not None and int(action.shape[1]) != int(expected_action_dim):
+        raise ValueError(f"data/action dim {action.shape[1]} != {expected_action_dim}")
+    if expected_pointcloud_dim is not None and int(point_cloud.shape[2]) != int(expected_pointcloud_dim):
+        raise ValueError(
+            f"data/point_cloud dim {point_cloud.shape[2]} != {expected_pointcloud_dim}"
+        )
+    if expected_num_points is not None and int(point_cloud.shape[1]) != int(expected_num_points):
+        raise ValueError(
+            f"data/point_cloud points {point_cloud.shape[1]} != {expected_num_points}"
         )
     for key, array in [("state", state), ("action", action), ("point_cloud", point_cloud)]:
         if not _array_is_finite(array):
@@ -65,6 +96,12 @@ def inspect_dp3_zarr(zarr_path: str | Path) -> dict[str, Any]:
         },
         "fixed_size_point_cloud": True,
         "attrs": dict(root.attrs),
+        "expected_checks": {
+            "state_dim": expected_state_dim,
+            "action_dim": expected_action_dim,
+            "pointcloud_dim": expected_pointcloud_dim,
+            "num_points": expected_num_points,
+        },
     }
     if "img" in data:
         img = data["img"]
@@ -111,6 +148,9 @@ def _print_summary(summary: dict[str, Any]) -> None:
         f"values={episode['values']}"
     )
     print(f"fixed_size_point_cloud: {summary['fixed_size_point_cloud']}")
+    expected = {key: value for key, value in summary["expected_checks"].items() if value is not None}
+    if expected:
+        print(f"expected_checks: {expected}")
     print("attrs:")
     print(json.dumps(summary["attrs"], indent=2, ensure_ascii=False)[:8000])
 
@@ -118,12 +158,22 @@ def _print_summary(summary: dict[str, Any]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zarr-path", required=True, help="Path to a DP3 zarr replay buffer")
+    parser.add_argument("--expected-state-dim", type=int, help="Require data/state last dim")
+    parser.add_argument("--expected-action-dim", type=int, help="Require data/action last dim")
+    parser.add_argument("--expected-pointcloud-dim", type=int, help="Require data/point_cloud C")
+    parser.add_argument("--expected-num-points", type=int, help="Require data/point_cloud N")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    inspect_dp3_zarr(args.zarr_path)
+    inspect_dp3_zarr(
+        args.zarr_path,
+        expected_state_dim=args.expected_state_dim,
+        expected_action_dim=args.expected_action_dim,
+        expected_pointcloud_dim=args.expected_pointcloud_dim,
+        expected_num_points=args.expected_num_points,
+    )
 
 
 if __name__ == "__main__":

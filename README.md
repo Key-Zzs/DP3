@@ -33,7 +33,7 @@ training smoke tests:
 
 ```bash
 conda activate dp3
-cd /home/deepcybo/workspace/3D-Diffusion-Policy
+cd 3D-Diffusion-Policy
 export PYTHONPATH=$PWD/PointCloudBuilder:$PWD/3D-Diffusion-Policy:$PYTHONPATH
 ```
 
@@ -42,18 +42,18 @@ export PYTHONPATH=$PWD/PointCloudBuilder:$PWD/3D-Diffusion-Policy:$PYTHONPATH
 If `--output-zarr` is omitted, the exporter writes to:
 
 ```text
-/home/deepcybo/.cache/dp3_zarr/<lerobot_repo_id>_<camera>_<pointcloud-mode>.zarr
+~/.cache/dp3_zarr/<lerobot_repo_id>_<camera>_<pointcloud-mode>.zarr
 ```
 
 The script first reads `repo_id` from `meta/info.json`. If the local dataset
 does not store `repo_id`, it falls back to the path relative to
-`/home/deepcybo/.cache/huggingface/lerobot`. Path separators and unsupported
+`~/.cache/huggingface/lerobot`. Path separators and unsupported
 filename characters in the repo id are replaced with `_`.
 
 For the example dataset below, the default `xyz` output is:
 
 ```text
-/home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
+~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
 ```
 
 Pass `--output-zarr` only when you need to override this location.
@@ -62,11 +62,11 @@ Pass `--output-zarr` only when you need to override this location.
 
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
-  --lerobot-path /home/deepcybo/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --camera head \
   --pointcloud-mode xyz \
   --num-points 1024 \
-  --builder-config /home/deepcybo/workspace/3D-Diffusion-Policy/third_party/real/flexiv-GN01/configs/data_config.yaml \
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
   --overwrite
 ```
 
@@ -74,11 +74,11 @@ python tools/export_lerobot_to_dp3_zarr.py \
 
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
-  --lerobot-path /home/deepcybo/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --camera head \
   --pointcloud-mode xyzrgb \
   --num-points 1024 \
-  --builder-config /home/deepcybo/workspace/3D-Diffusion-Policy/third_party/real/flexiv-GN01/configs/data_config.yaml \
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml \
   --overwrite
 ```
 
@@ -91,7 +91,7 @@ depth intrinsics, color intrinsics, depth scale, and for `xyzrgb` the
 
 ```bash
 python tools/inspect_dp3_zarr.py \
-  --zarr-path /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
+  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
 ```
 
 The inspector checks `data/state`, `data/action`, `data/point_cloud`, and
@@ -102,16 +102,17 @@ The inspector checks `data/state`, `data/action`, `data/point_cloud`, and
 
 Use the Open3D zarr point-cloud viewer:
 
-[visualize_zarr_pointcloud.py](/home/deepcybo/workspace/3D-Diffusion-Policy/visualizer/visualizer/visualize_zarr_pointcloud.py)
+[visualize_zarr_pointcloud.py](visualizer/visualizer/visualize_zarr_pointcloud.py)
 
 You can pass either the zarr root or the direct `data/point_cloud` array path.
-The path must be absolute.
+Use an absolute path for zarr inputs; examples use `~` to avoid machine-specific
+home directories.
 
 Visualize one frame from the zarr root:
 
 ```bash
 python visualizer/visualizer/visualize_zarr_pointcloud.py \
-  --zarr-path /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr \
+  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr \
   --frame 0
 ```
 
@@ -119,7 +120,7 @@ Visualize one frame from the direct point-cloud array:
 
 ```bash
 python visualizer/visualizer/visualize_zarr_pointcloud.py \
-  --zarr-path /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr/data/point_cloud \
+  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr/data/point_cloud \
   --frame 0
 ```
 
@@ -155,7 +156,7 @@ RGB-D frame:
 
 ```bash
 python tools/debug_zarr_pointcloud_stages.py \
-  --dp3-zarr /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
+  --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
   --frame-index 0
 ```
 
@@ -165,21 +166,21 @@ on disk has changed. To test the currently edited config, pass it explicitly:
 
 ```bash
 python tools/debug_zarr_pointcloud_stages.py \
-  --dp3-zarr /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
+  --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
   --frame-index 0 \
-  --builder-config third_party/real/flexiv-GN01/configs/data_rgb_config.yaml
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml
 ```
 
 Debug directly from a LeRobot dataset without reading zarr attrs:
 
 ```bash
 python tools/debug_lerobot_pointcloud_stages.py \
-  --lerobot-path /home/deepcybo/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --frame-index 0 \
   --camera head \
   --pointcloud-mode xyzrgb \
   --num-points 1024 \
-  --builder-config third_party/real/flexiv-GN01/configs/data_rgb_config.yaml
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml
 ```
 
 Add `--no-show` to print stage shapes and metadata without opening the Open3D
@@ -213,4 +214,68 @@ policy:
   use_pc_color: true
   pointcloud_encoder_cfg:
     in_channels: 6
+```
+
+## Train Flexiv Dual-Arm DP3
+
+The wrapper trains from an exported DP3 zarr and lets you choose the physical
+GPU explicitly as the fourth positional argument. The script sets
+`CUDA_VISIBLE_DEVICES=<gpu_id>`, so training uses `cuda:0` inside the selected
+visible device.
+
+XYZ point cloud:
+
+```bash
+conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
+  xyz \
+  /path/to/flexiv_head_xyz.zarr \
+  simple_dp3 \
+  0 \
+  42
+```
+
+XYZRGB point cloud:
+
+```bash
+conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
+  xyzrgb \
+  /path/to/flexiv_head_xyzrgb.zarr \
+  simple_dp3 \
+  0 \
+  42
+```
+
+Arguments are:
+
+```text
+<xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...]
+```
+
+By default, checkpoints are written to this repository-relative path:
+
+```text
+outputs/<exp_name>_seed<seed>/checkpoints/
+```
+
+Set `RUN_DIR=/custom/output/dir` to override the whole Hydra output directory.
+Useful environment overrides include `SAVE_CKPT=True|False`,
+`WANDB_MODE=offline|online|disabled`, `BATCH_SIZE`, `NUM_WORKERS`,
+`MAX_TRAIN_EPISODES`, and `EXP_NAME`.
+
+Short sanity run:
+
+```bash
+DEBUG=False SAVE_CKPT=False WANDB_MODE=disabled MAX_TRAIN_EPISODES=1 \
+BATCH_SIZE=1 NUM_WORKERS=0 \
+conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
+  xyz \
+  /path/to/flexiv_head_xyz.zarr \
+  simple_dp3 \
+  0 \
+  42 \
+  training.num_epochs=1 \
+  training.max_train_steps=1 \
+  training.use_ema=False \
+  training.sample_every=999999 \
+  policy.num_inference_steps=1
 ```

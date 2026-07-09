@@ -1,0 +1,31 @@
+name: flexiv_dual_arm_head_xyzrgb
+
+task_name: flexiv_dual_arm_head_xyzrgb
+
+shape_meta: &shape_meta
+  obs:
+    point_cloud:
+      shape: [1024, 6]
+      type: point_cloud
+    agent_pos:
+      shape: [28]
+      type: low_dim
+  action:
+    shape: [14]
+
+env_runner: null
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.flexiv_dual_arm_dataset.FlexivDualArmDataset
+  zarr_path: data/flexiv_dual_arm_head_xyzrgb.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: 90
+  task_name: ${task_name}
+  expected_state_dim: 28
+  expected_action_dim: 14
+  expected_pointcloud_dim: 6
+  expected_num_points: 1024
