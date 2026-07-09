@@ -1,6 +1,6 @@
 # 代码仓库中文解析报告
 
-本报告面向刚接触具身智能、机器人控制和深度学习策略学习的读者。阅读范围以当前仓库真实文件为准，排除了 `.git`、缓存、日志、输出、数据集、权重和 `third_party` 大目录。本次重点阅读约 66 个文件，并全量扫描了 `diffusion_policy_3d/config/task/` 下 61 个任务配置文件的命名和组织方式。
+本报告面向刚接触具身智能、机器人控制和深度学习策略学习的读者。阅读范围以当前仓库真实文件为准，排除了 `.git`、缓存、日志、输出、数据集、权重和 `third_party` 大目录。本次重点阅读约 66 个文件，并全量扫描了 `diffusion_policy_3d/config/task/sim/` 下 61 个任务配置文件的命名和组织方式。
 
 几个术语先说明：
 
@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | 仓库名称 | 3D Diffusion Policy，简称 DP3 | `README.md` 标题和简介 |
 | 主要任务 | 3D 点云视觉模仿学习：从点云和机器人状态预测连续控制动作 | `README.md`，`policy/dp3.py`，`model/vision/pointnet_extractor.py` |
-| 所属方向 | imitation learning、diffusion policy、3D point cloud policy、robot manipulation、sim-to-real 数据训练 | `README.md`、`config/task/*.yaml`、`env_runner/*.py` |
+| 所属方向 | imitation learning、diffusion policy、3D point cloud policy、robot manipulation、sim-to-real 数据训练 | `README.md`、`config/task/sim/*.yaml`、`env_runner/*.py` |
 | 主要输入 | `point_cloud`、`agent_pos`，DexArt 还可用 `imagin_robot`；环境还产生 `image`、`depth`，但当前 DP3Encoder 不读取 RGB/depth | `dataset/*.py`，`model/vision/pointnet_extractor.py`，`env/*/*wrapper.py` |
 | 主要输出 | 连续动作轨迹 chunk，形状为 `(B, n_action_steps, action_dim)` | `policy/dp3.py:predict_action()` |
-| 支持环境/数据 | Adroit、DexArt、MetaWorld、RealDex zarr 数据 | `config/task/*.yaml`，`dataset/*.py`，`env_runner/*.py` |
+| 支持环境/数据 | Adroit、DexArt、MetaWorld、RealDex zarr 数据 | `config/task/sim/*.yaml`，`dataset/*.py`，`env_runner/*.py` |
 | 训练入口 | `3D-Diffusion-Policy/train.py`，外层脚本 `scripts/train_policy.sh` | `train.py`，`scripts/train_policy.sh` |
 | 评估/推理入口 | `3D-Diffusion-Policy/eval.py`，外层脚本 `scripts/eval_policy.sh` | `eval.py`，`scripts/eval_policy.sh` |
 | 数据处理入口 | 仿真演示生成脚本和真实机器人数据转换示例 | `scripts/gen_demonstration_*.sh`，`scripts/convert_real_robot_data.py` |
@@ -70,7 +70,7 @@
 | `3D-Diffusion-Policy/setup.py` | 安装脚本 | 安装 `diffusion_policy_3d` 包 | 可选 | 只有 `find_packages()` |
 | `diffusion_policy_3d/config/dp3.yaml` | Hydra 主配置 | 原始 DP3 配置，较大的 U-Net | 是 | `_target_` 指向 `policy.dp3.DP3` |
 | `diffusion_policy_3d/config/simple_dp3.yaml` | Hydra 主配置 | 简化版 DP3，较小 U-Net | 是 | `_target_` 指向 `policy.simple_dp3.SimpleDP3` |
-| `diffusion_policy_3d/config/task/*.yaml` | Hydra 任务配置 | 61 个任务的 observation/action 维度、dataset、env_runner | 是 | 建议先读代表文件：`adroit_hammer.yaml`、`dexart_bucket.yaml`、`metaworld_assembly.yaml`、`realdex_drill.yaml` |
+| `diffusion_policy_3d/config/task/sim/*.yaml` | Hydra 任务配置 | 61 个任务的 observation/action 维度、dataset、env_runner | 是 | 建议先读代表文件：`adroit_hammer.yaml`、`dexart_bucket.yaml`、`metaworld_assembly.yaml`、`realdex_drill.yaml` |
 | `diffusion_policy_3d/policy/base_policy.py` | 抽象类 | 定义 `predict_action()` 和 `set_normalizer()` 接口 | 是 | env_runner 只依赖这个接口 |
 | `diffusion_policy_3d/policy/dp3.py` | 策略 | DP3 策略，含初始化、采样推理、loss | 是 | 最核心文件之一 |
 | `diffusion_policy_3d/policy/simple_dp3.py` | 策略 | SimpleDP3 策略，逻辑几乎同 DP3 | 是 | 使用更简化的 U-Net 实现 |
@@ -116,7 +116,7 @@
 
 ### 2.3 任务配置分组
 
-`diffusion_policy_3d/config/task/` 下共有 61 个 `.yaml`：
+`diffusion_policy_3d/config/task/sim/` 下共有 61 个 `.yaml`：
 
 - Adroit: `adroit_door.yaml`、`adroit_hammer.yaml`、`adroit_pen.yaml`。
 - DexArt: `dexart_bucket.yaml`、`dexart_faucet.yaml`、`dexart_laptop.yaml`、`dexart_toilet.yaml`。
@@ -585,7 +585,7 @@ hard-coded expert_data_path
 | 字段 | 是否进入当前 DP3 模型 | 形状示例 | 来源文件 | 说明 |
 | --- | --- | --- | --- | --- |
 | `point_cloud` | 是 | Adroit `(512,3/6)`，MetaWorld `(512,3)`，DexArt/RealDex `(1024,3/6)` | `dataset/*.py`，`env/*/*wrapper.py` | 模型默认只取 xyz，除非 `use_pc_color=true` |
-| `agent_pos` | 是 | Adroit 24，DexArt 33，MetaWorld 9，RealDex 22 | `config/task/*.yaml`，`dataset/*.py` | 由 zarr `state` 映射而来 |
+| `agent_pos` | 是 | Adroit 24，DexArt 33，MetaWorld 9，RealDex 22 | `config/task/sim/*.yaml`，`dataset/*.py` | 由 zarr `state` 映射而来 |
 | `imagin_robot` | DexArt 使用 | `(96,7)` | `dexart_dataset.py`，`dexart_wrapper.py` | `DP3Encoder` 会把其前几维对齐后拼到点云上 |
 | `image` | 当前核心模型不使用 | `(3,84,84)` | env wrappers、zarr `img` | 配置和环境里存在，但 `DP3Encoder.forward()` 没读取 |
 | `depth` | 当前核心模型不使用 | `(84,84)` | env wrappers、转换脚本 | 用于点云生成或保存，但 dataset 不送入模型 |
@@ -596,12 +596,12 @@ hard-coded expert_data_path
 
 | 任务族 | action 维度 | 配置依据 | 执行方式 |
 | --- | --- | --- | --- |
-| Adroit hammer | 26 | `config/task/adroit_hammer.yaml` | 交给 Adroit env action space |
-| Adroit door | 28 | `config/task/adroit_door.yaml` | 交给 Adroit env action space |
-| Adroit pen | 24 | `config/task/adroit_pen.yaml` | 交给 Adroit env action space |
-| DexArt | 22 | `config/task/dexart_*.yaml` | `DexArtEnv.step(action)` |
-| MetaWorld | 4 | `config/task/metaworld_*.yaml` | `MetaWorldEnv.step(action)` |
-| RealDex | 22 | `config/task/realdex_*.yaml` | 仓库未提供真实机器人部署接口 |
+| Adroit hammer | 26 | `config/task/sim/adroit_hammer.yaml` | 交给 Adroit env action space |
+| Adroit door | 28 | `config/task/sim/adroit_door.yaml` | 交给 Adroit env action space |
+| Adroit pen | 24 | `config/task/sim/adroit_pen.yaml` | 交给 Adroit env action space |
+| DexArt | 22 | `config/task/sim/dexart_*.yaml` | `DexArtEnv.step(action)` |
+| MetaWorld | 4 | `config/task/sim/metaworld_*.yaml` | `MetaWorldEnv.step(action)` |
+| RealDex | 22 | `config/task/sim/realdex_*.yaml` | 仓库未提供真实机器人部署接口 |
 
 动作在模型中是轨迹：
 
@@ -720,20 +720,20 @@ while not done:
 
 任务配置：
 
-- `task/*.yaml`
+- `task/sim/*.yaml`
 
 命令行覆盖示例：
 
 ```bash
 cd 3D-Diffusion-Policy
-python train.py --config-name=dp3.yaml task=adroit_hammer training.seed=0 training.device=cuda:0
+python train.py --config-name=dp3.yaml task=sim/adroit_hammer training.seed=0 training.device=cuda:0
 ```
 
 ### 9.2 主配置关键项
 
 | 配置项 | 所在文件 | 含义 | 影响范围 | 推荐初学者是否修改 |
 | --- | --- | --- | --- | --- |
-| `defaults: - task: adroit_hammer` | `dp3.yaml`、`simple_dp3.yaml` | 默认任务 | dataset/env/action 维度 | 可以，用命令行 `task=...` |
+| `defaults: - task: sim/adroit_hammer` | `dp3.yaml`、`simple_dp3.yaml` | 默认任务 | dataset/env/action 维度 | 可以，用命令行 `task=...` |
 | `horizon: 16` | 主配置 | 扩散预测轨迹长度 | dataset 采样、U-Net 输入输出 | 谨慎修改 |
 | `n_obs_steps: 2` | 主配置 | 输入 observation 时间步数 | dataset padding、encoder condition | 可小范围尝试 |
 | `n_action_steps: 8` | 主配置 | 每次执行动作 chunk 长度 | env runner、MultiStepWrapper | 可小范围尝试 |
@@ -768,8 +768,8 @@ python train.py --config-name=dp3.yaml task=adroit_hammer training.seed=0 traini
 
 ### 9.4 当前配置不清晰点
 
-- `README.md` 的自定义任务步骤写的是 `diffusion_policy_3d/configs/task`，实际目录是 `diffusion_policy_3d/config/task`。
-- `config/task/realdex_drill.yaml` 中 `agent_pos.type` 写成 `low_dimx`，其他 RealDex 任务和模型语义应为 `low_dim`。当前 `DP3Encoder` 实际只用 shape，不读 type，所以训练可能不直接报错，但这是配置质量问题。
+- 自定义任务配置目录是 `diffusion_policy_3d/config/task/sim`。
+- `config/task/sim/realdex_drill.yaml` 中 `agent_pos.type` 写成 `low_dimx`，其他 RealDex 任务和模型语义应为 `low_dim`。当前 `DP3Encoder` 实际只用 shape，不读 type，所以训练可能不直接报错，但这是配置质量问题。
 - `dexart_bucket.yaml` 中配置了 `image`，但 `DexArtDataset._sample_to_data()` 没输出 `image`，`DP3Encoder.forward()` 也不读取 `image`。
 
 ## 10. 从零复现流程
@@ -827,7 +827,7 @@ bash scripts/train_policy.sh dp3 adroit_hammer 0112 0 0
 ```bash
 cd 3D-Diffusion-Policy
 HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=0 python train.py --config-name=dp3.yaml \
-  task=adroit_hammer \
+  task=sim/adroit_hammer \
   hydra.run.dir=data/outputs/adroit_hammer-dp3-0112_seed0 \
   training.debug=False \
   training.seed=0 \
@@ -842,7 +842,7 @@ HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=0 python train.py --config-name=dp3.yaml
 ```bash
 cd 3D-Diffusion-Policy
 HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=0 python train.py --config-name=simple_dp3.yaml \
-  task=adroit_hammer \
+  task=sim/adroit_hammer \
   training.debug=True \
   training.device=cuda:0 \
   logging.mode=offline \
@@ -864,7 +864,7 @@ data/outputs/adroit_hammer-dp3-0112_seed0/checkpoints/latest.ckpt
 ```bash
 cd 3D-Diffusion-Policy
 HYDRA_FULL_ERROR=1 CUDA_VISIBLE_DEVICES=0 python eval.py --config-name=dp3.yaml \
-  task=adroit_hammer \
+  task=sim/adroit_hammer \
   hydra.run.dir=data/outputs/adroit_hammer-dp3-0112_seed0 \
   training.seed=0 \
   training.device=cuda:0 \
@@ -949,7 +949,7 @@ PY
 3. `scripts/train_policy.sh`
 4. `3D-Diffusion-Policy/train.py`
 5. `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3.yaml`
-6. `3D-Diffusion-Policy/diffusion_policy_3d/config/task/adroit_hammer.yaml`
+6. `3D-Diffusion-Policy/diffusion_policy_3d/config/task/sim/adroit_hammer.yaml`
 
 ### 第二阶段：理解数据流
 
@@ -998,7 +998,7 @@ PY
 | 替换 PointNet 容量 | `pointnet_extractor.py` 或 `pointcloud_encoder_cfg` | 中 |
 | 添加新 proprioception | task yaml、dataset `_sample_to_data()`、zarr 字段 | 中 |
 | 修改 action 维度 | task yaml、dataset 数据、env action space、policy checkpoint | 高 |
-| 添加新环境 | `env/`、`env_runner/`、`dataset/`、`config/task/` | 高 |
+| 添加新环境 | `env/`、`env_runner/`、`dataset/`、`config/task/sim/` | 高 |
 
 ## 12. 适合后续修改的位置
 
@@ -1006,7 +1006,7 @@ PY
 
 - `diffusion_policy_3d/config/dp3.yaml`
 - `diffusion_policy_3d/config/simple_dp3.yaml`
-- `diffusion_policy_3d/config/task/*.yaml`
+- `diffusion_policy_3d/config/task/sim/*.yaml`
 - `scripts/train_policy.sh`
 
 最常改：
@@ -1030,7 +1030,7 @@ dataset.zarr_path
 - 新增或修改 `diffusion_policy_3d/dataset/*.py`。
 - 确保 `__getitem__()` 返回 `{"obs": ..., "action": ...}`。
 - 确保 `get_normalizer()` 覆盖所有进入 policy 的 key。
-- 新增 `diffusion_policy_3d/config/task/your_task.yaml`。
+- 新增 `diffusion_policy_3d/config/task/sim/your_task.yaml`。
 
 ### 12.3 换 observation
 
@@ -1067,9 +1067,9 @@ dataset.zarr_path
 
 ## 13. 当前仓库可能存在的问题或不清晰点
 
-1. `README.md` 自定义任务步骤写的是 `diffusion_policy_3d/configs/task`，当前真实目录是 `diffusion_policy_3d/config/task`。
+1. 自定义任务配置目录是 `diffusion_policy_3d/config/task/sim`。
 2. `scripts/eval_policy.sh` 使用 `wandb_mode` 和 `save_ckpt`，但脚本内没有定义。建议直接显式运行 `python eval.py ... logging.mode=offline checkpoint.save_ckpt=False`。
-3. `config/task/realdex_drill.yaml` 的 `agent_pos.type` 是 `low_dimx`，疑似 typo。
+3. `config/task/sim/realdex_drill.yaml` 的 `agent_pos.type` 是 `low_dimx`，疑似 typo。
 4. 多个 task yaml 或 env wrapper 中有 `image`、`depth`，但当前 `DP3Encoder` 没有读取 RGB/depth，核心训练实际是点云加 `agent_pos`。
 5. `train.py` 构造了 validation dataset 和 dataloader，但 `RUN_VALIDATION = False` 写死，默认不跑 validation loss。
 6. `scripts/convert_real_robot_data.py` 是硬编码路径示例，不是可参数化数据转换工具。
@@ -1097,7 +1097,7 @@ dataset.zarr_path
 下一步最应该读的 5 个文件：
 
 1. `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3.yaml`
-2. `3D-Diffusion-Policy/diffusion_policy_3d/config/task/adroit_hammer.yaml`
+2. `3D-Diffusion-Policy/diffusion_policy_3d/config/task/sim/adroit_hammer.yaml`
 3. `3D-Diffusion-Policy/diffusion_policy_3d/dataset/adroit_dataset.py`
 4. `3D-Diffusion-Policy/diffusion_policy_3d/policy/dp3.py`
 5. `3D-Diffusion-Policy/diffusion_policy_3d/env_runner/adroit_runner.py`

@@ -1,5 +1,5 @@
 defaults:
-  - task: adroit_hammer
+  - task: sim/adroit_hammer
 
 name: train_simple_dp3
 

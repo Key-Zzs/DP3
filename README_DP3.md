@@ -173,7 +173,7 @@ The good part of DP3 is its universality, so that you could easily run DP3 on yo
 
 4. Add the dataset which loads your data. See `3D-Diffusion-Policy/diffusion_policy_3d/dataset/` for examples.
 
-5. Add the config file in `3D-Diffusion-Policy/diffusion_policy_3d/configs/task`. There have been many examples in the folder.
+5. Add the config file in `3D-Diffusion-Policy/diffusion_policy_3d/config/task/sim`. There have been many examples in the folder.
 
 6. Train and evaluate DP3 on your task. See `3D-Diffusion-Policy/scripts/train_policy.sh` for examples.
 
