@@ -250,6 +250,12 @@ outputs/<exp_name>_seed<seed>/checkpoints/
 `SAVE_CKPT=True|False`、`WANDB_MODE=offline|online|disabled`、`BATCH_SIZE`、
 `NUM_WORKERS`、`MAX_TRAIN_EPISODES` 和 `EXP_NAME`。
 
+Flexiv 训练统一读取
+`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`。
+其中 `algorithm` 可选 `simple_dp3` 或 `dp3`，训练脚本也会根据第三个位置参数覆盖该字段。
+模型结构、观测/动作时域和扩散调度器属于训练推理一致参数；优化器、EMA 更新、
+dataloader、epoch、日志和 checkpoint 保存属于训练专用参数。
+
 最小 sanity 训练：
 
 ```bash
@@ -264,6 +270,49 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
   training.num_epochs=1 \
   training.max_train_steps=1 \
   training.use_ema=False \
-  training.sample_every=999999 \
-  policy.num_inference_steps=1
+  training.sample_every=999999
 ```
+
+## Flexiv 双臂 DP3 推理
+
+推理参数统一放在
+`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_inference_config.yaml`。
+在该文件中设置 checkpoint、机器人配置、GPU、可选运行时长上限、控制频率、
+receding/chunk 动作模式、反向扩散步数、动作限幅、点云配置和 Open3D 可视化。
+
+训练和推理 YAML 都显式包含模型结构、时域、扩散调度器、点云 shape、state/action
+shape 和 EMA 选择。推理入口会在连接机器人前，将这些参数与 checkpoint 内保存的训练
+配置逐项比较；只有推理专用参数允许不同。
+
+完整推理部署只运行一条命令：
+
+```bash
+conda run -n dp3 bash scripts/run_flexiv_dual_arm_dp3_inference.sh
+```
+
+已经激活 `dp3` 环境时：
+
+```bash
+bash scripts/run_flexiv_dual_arm_dp3_inference.sh
+```
+
+这是会产生机器人运动的 `inference` 流程，会直接执行实时 RGB-D 反投影、裁剪、
+1024 点采样、策略预测、动作过滤和 `robot.send_action()`；不再包含独立的无动作阶段或
+模式切换流程。默认 Open3D 显示进程以 2 Hz 运行，通过容量为 1 的 latest-frame
+队列接收数据，不会阻塞控制循环。
+
+默认配置会持续闭环推理，直到在当前终端按 `Ctrl+C`。启动器也会打印 JSONL 日志位置
+和停止命令；也可以在另一个终端执行：
+
+```bash
+touch /tmp/stop_flexiv_dp3_inference
+```
+
+还保留一个可选的无硬件配置检查，但它不属于正常部署流程：
+
+```bash
+conda run -n dp3 bash scripts/run_flexiv_dual_arm_dp3_inference.sh --check-config
+```
+
+参数分类、完整运行链路和停止行为见
+[docs/flexiv_dual_arm_inference.md](docs/flexiv_dual_arm_inference.md)。

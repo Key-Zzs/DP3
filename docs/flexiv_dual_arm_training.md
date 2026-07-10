@@ -56,7 +56,8 @@ Equivalent direct Hydra override:
 
 ```bash
 cd 3D-Diffusion-Policy
-HYDRA_FULL_ERROR=1 python train.py --config-name=simple_dp3.yaml \
+HYDRA_FULL_ERROR=1 python train.py --config-name=dp3_train_config.yaml \
+  algorithm=simple_dp3 \
   task=real/flexiv_dual_arm_head_xyz \
   task.dataset.zarr_path=/path/to/flexiv_head_xyz.zarr \
   hydra.run.dir=3D-Diffusion-Policy/outputs/flexiv_dual_arm_head_xyz-simple_dp3_seed42 \
@@ -101,7 +102,6 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
   training.max_train_steps=1 \
   training.use_ema=False \
   training.sample_every=999999 \
-  policy.num_inference_steps=1 \
   hydra.run.dir=3D-Diffusion-Policy/outputs/dp3_flexiv_sanity_xyz
 ```
 
@@ -109,7 +109,8 @@ For a smaller non-debug run:
 
 ```bash
 cd 3D-Diffusion-Policy
-HYDRA_FULL_ERROR=1 python train.py --config-name=simple_dp3.yaml \
+HYDRA_FULL_ERROR=1 python train.py --config-name=dp3_train_config.yaml \
+  algorithm=simple_dp3 \
   task=real/flexiv_dual_arm_head_xyz \
   task.dataset.zarr_path=/path/to/flexiv_head_xyz.zarr \
   task.dataset.max_train_episodes=1 \

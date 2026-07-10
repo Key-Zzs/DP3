@@ -24,6 +24,9 @@ Environment overrides:
 
 Default checkpoint directory, relative to this repository:
   outputs/<exp_name>_seed<seed>/checkpoints/
+
+Training hyperparameters:
+  3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml
 USAGE
 }
 
@@ -139,7 +142,8 @@ cd "${REPO_ROOT}/3D-Diffusion-Policy"
 export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
-python train.py --config-name="${ALG_NAME}.yaml" \
+python train.py --config-name="dp3_train_config.yaml" \
+  algorithm="${ALG_NAME}" \
   task="${TASK_CONFIG}" \
   task.dataset.zarr_path="${ZARR_PATH}" \
   task.dataset.max_train_episodes="${MAX_TRAIN_EPISODES}" \

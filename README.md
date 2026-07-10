@@ -267,6 +267,14 @@ Useful environment overrides include `SAVE_CKPT=True|False`,
 `WANDB_MODE=offline|online|disabled`, `BATCH_SIZE`, `NUM_WORKERS`,
 `MAX_TRAIN_EPISODES`, and `EXP_NAME`.
 
+Flexiv training now uses
+`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`.
+Set its `algorithm` to `simple_dp3` or `dp3`; the training wrapper also sets
+this field from its third positional argument. Model structure, observation and
+action horizons, and diffusion scheduler fields form the train/inference
+consistency contract. Optimizer, EMA update, dataloader, epoch, logging, and
+checkpoint settings are training-only.
+
 Short sanity run:
 
 ```bash
@@ -281,6 +289,53 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
   training.num_epochs=1 \
   training.max_train_steps=1 \
   training.use_ema=False \
-  training.sample_every=999999 \
-  policy.num_inference_steps=1
+  training.sample_every=999999
 ```
+
+## Flexiv Dual-Arm DP3 Inference
+
+Inference parameters live in
+`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_inference_config.yaml`.
+Edit that file to select the checkpoint, robot config, GPU, optional duration limit,
+control rate, receding/chunk action mode, reverse-diffusion steps, safety limits,
+point-cloud config, and Open3D visualization.
+
+The model architecture, horizons, scheduler, point-cloud shape, state/action
+shape, and EMA selection are duplicated in the train and inference YAMLs. The
+launcher compares those fields with the checkpoint payload before connecting;
+only inference-specific fields may differ.
+
+Run the complete policy deployment with one command:
+
+```bash
+conda run -n dp3 bash scripts/run_flexiv_dual_arm_dp3_inference.sh
+```
+
+When the `dp3` environment is already active:
+
+```bash
+bash scripts/run_flexiv_dual_arm_dp3_inference.sh
+```
+
+This is the motion-producing `inference` path. It directly runs live RGB-D
+deprojection, crop, 1024-point sampling, policy prediction, action filtering,
+and `robot.send_action()`; there is no separate no-send stage or mode handoff. The default
+Open3D monitor runs in a separate process at 2 Hz with capacity-one latest-frame
+queues, so visualization cannot block the control loop.
+
+The default configuration runs closed-loop inference until `Ctrl+C`. The launcher
+also prints the generated JSONL path and stop-file command, so another terminal can stop it with:
+
+```bash
+touch /tmp/stop_flexiv_dp3_inference
+```
+
+An optional no-hardware configuration check is available but is not part of the
+normal deployment sequence:
+
+```bash
+conda run -n dp3 bash scripts/run_flexiv_dual_arm_dp3_inference.sh --check-config
+```
+
+See [docs/flexiv_dual_arm_inference.md](docs/flexiv_dual_arm_inference.md) for
+the parameter classification, runtime flow, and hardware stop behavior.

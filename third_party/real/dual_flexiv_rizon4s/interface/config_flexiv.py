@@ -27,6 +27,7 @@ class FlexivDualArmConfig(RobotConfig):
     debug: bool = True
 
     use_gripper: bool = False
+    read_gripper_state_in_debug: bool = False
     left_gripper_name: str = ""
     right_gripper_name: str = ""
     left_tool_name: str = ""

@@ -49,6 +49,7 @@ personal_TASK.md
 easytrain.sh
 nohup.out
 outputs/
+logs/
 
 # tar files
 *.tar.gz

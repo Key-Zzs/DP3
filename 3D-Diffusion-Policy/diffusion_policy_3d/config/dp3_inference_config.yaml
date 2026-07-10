@@ -1,0 +1,122 @@
+# Default Flexiv dual-arm DP3 deployment configuration.
+# Run with: bash scripts/run_flexiv_dual_arm_dp3_inference.sh
+
+# Select the policy family stored in checkpoint.path.
+algorithm: simple_dp3 # simple_dp3 | dp3
+algorithm_profiles:
+  simple_dp3:
+    policy_target: diffusion_policy_3d.policy.simple_dp3.SimpleDP3
+    horizon: 4
+    n_action_steps: 3
+    down_dims: [128, 256, 384]
+  dp3:
+    policy_target: diffusion_policy_3d.policy.dp3.DP3
+    horizon: 16
+    n_action_steps: 8
+    down_dims: [512, 1024, 2048]
+
+# -----------------------------------------------------------------------------
+# Train/inference consistency contract.
+# These values must match dp3_train_config.yaml and the checkpoint payload.
+# -----------------------------------------------------------------------------
+shape_meta:
+  obs:
+    point_cloud:
+      shape: [1024, 3]
+      type: point_cloud
+    agent_pos:
+      shape: [28]
+      type: low_dim
+  action:
+    shape: [14]
+
+policy:
+  _target_: ${algorithm_profiles.${algorithm}.policy_target}
+  horizon: ${algorithm_profiles.${algorithm}.horizon}
+  n_obs_steps: 2
+  n_action_steps: ${algorithm_profiles.${algorithm}.n_action_steps}
+  obs_as_global_cond: true
+
+  use_point_crop: true
+  condition_type: film
+  use_down_condition: true
+  use_mid_condition: true
+  use_up_condition: true
+  diffusion_step_embed_dim: 128
+  down_dims: ${algorithm_profiles.${algorithm}.down_dims}
+  crop_shape: [80, 80]
+  encoder_output_dim: 64
+  kernel_size: 5
+  n_groups: 8
+
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: sample
+
+  use_pc_color: false
+  pointnet_type: pointnet
+  pointcloud_encoder_cfg:
+    in_channels: 3
+    out_channels: 64
+    use_layernorm: true
+    final_norm: layernorm
+    normal_channel: false
+
+# Select EMA or raw model weights from the checkpoint payload.
+use_ema: true
+
+# -----------------------------------------------------------------------------
+# Inference-only parameters.
+# -----------------------------------------------------------------------------
+checkpoint:
+  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3_seed42/checkpoints/latest.ckpt
+
+robot:
+  config: ~/flexiv_ws/dual_arm_teleop/scripts/config/robots/flexiv_config.yaml
+  lerobot_src: ~/flexiv_ws/Le-nero/src
+  switch_cartesian_mode_on_connect: true
+  allow_connect_motion: false
+  camera_name: head_rgb
+  camera_fps: 30
+
+pointcloud:
+  config: third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml
+  device: cuda:0
+
+inference:
+  gpu_id: 0
+  device: cuda:0
+  # null runs until Ctrl+C or stop_file exists; set a positive number for a timed test.
+  duration_seconds: null
+  rate_hz: 5
+  action_mode: receding # receding | chunk
+  num_inference_steps: 10
+  log_dir: logs
+  log_level: WARNING
+  stop_file: /tmp/stop_flexiv_dp3_inference
+
+  # Post-policy action scaling and clipping.
+  low_speed_scale: 0.1 # (0, 1]; increase carefully if trained deltas are too small
+  max_cartesian_delta: 0.01 # positive xyz delta-norm limit per arm and cycle
+  max_rotation_delta: 0.02 # positive rotvec delta-norm limit per arm and cycle
+
+  # Runtime watchdogs. They stop inference on stale observations or overruns.
+  max_policy_latency_ms: 250
+  max_camera_frame_age_ms: 1000
+  max_action_age_ms: 500
+  max_send_duration_ms: 500
+  max_loop_overrun_ms: 250
+
+visualization:
+  enabled: true
+  rate_hz: 2
+  max_raw_points: 30000
+  max_cropped_points: 30000
+  point_size: 3
