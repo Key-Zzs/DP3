@@ -1,4 +1,4 @@
-"""LeRobot adapter for two Flexiv Rizon4s arms through Flexiv RDK."""
+"""Standalone adapter for two Flexiv Rizon4s arms through Flexiv RDK."""
 
 from __future__ import annotations
 
@@ -10,11 +10,9 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from lerobot.cameras import make_cameras_from_configs
-from lerobot.robots.robot import Robot
-from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
-
 from .config_flexiv import FlexivDualArmConfig
+from .errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from .realsense_camera import make_cameras_from_configs
 
 logger = logging.getLogger(__name__)
 
@@ -107,15 +105,15 @@ def _scipy_quat_xyzw_to_rdk_wxyz(quat_xyzw: Any) -> np.ndarray:
     return np.array([quat[3], quat[0], quat[1], quat[2]], dtype=float)
 
 
-class FlexivDualArm(Robot):
+class FlexivDualArm:
     """Dual Flexiv Rizon4s adapter using Flexiv RDK Cartesian servo commands."""
 
     config_class = FlexivDualArmConfig
     name = "flexiv_dual_arm"
 
     def __init__(self, config: FlexivDualArmConfig):
-        super().__init__(config)
         self.config = config
+        self.robot_type = self.name
         self.cameras = make_cameras_from_configs(config.cameras)
         self._is_connected = False
         self._flexivrdk = None
@@ -170,7 +168,7 @@ class FlexivDualArm(Robot):
             raise ValueError(
                 "Flexiv robot serial numbers are required. Fill "
                 "`left_robot_sn` and `right_robot_sn` in "
-                "scripts/config/robots/flexiv_config.yaml."
+                "the local Flexiv runtime config."
             )
 
         try:
@@ -237,7 +235,7 @@ class FlexivDualArm(Robot):
                     f"Failed to switch {side} Flexiv arm to NRT_CARTESIAN_MOTION_FORCE. "
                     "Make sure the arm is not touching anything while ZeroFTSensor runs. "
                     "If this is only a connection/reset smoke test, set "
-                    "`switch_cartesian_mode_on_connect: false` in flexiv_config.yaml."
+                    "`switch_cartesian_mode_on_connect: false` in the local runtime config."
                 ) from exc
             robot.SetForceControlAxis([False, False, False, False, False, False])
 

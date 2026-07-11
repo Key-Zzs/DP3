@@ -305,6 +305,30 @@ shape, and EMA selection are duplicated in the train and inference YAMLs. The
 launcher compares those fields with the checkpoint payload before connecting;
 only inference-specific fields may differ.
 
+The live runtime is standalone in this repository. It uses the local Flexiv
+adapter and RealSense RGB-D implementation under
+`third_party/real/dual_flexiv_rizon4s/interface`; it does not require an
+external Le-nero checkout or the LeRobot Python package. This is separate from
+the offline LeRobot dataset compatibility documented above.
+
+Install the minimal robot-side dependencies without changing the DP3
+Torch/CUDA stack:
+
+```bash
+python -m pip install -r third_party/real/dual_flexiv_rizon4s/requirements-runtime.txt
+```
+
+Create a private, gitignored station configuration and replace all hardware
+placeholders:
+
+```bash
+cp third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.example.yaml \
+  third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml
+```
+
+Set `FLEXIV_DP3_ROBOT_CONFIG=/absolute/path/to/config.yaml` to use another
+private config path. Never commit real robot or camera serial numbers.
+
 Run the complete policy deployment with one command:
 
 ```bash
@@ -336,6 +360,13 @@ normal deployment sequence:
 ```bash
 conda run -n dp3 bash scripts/run_flexiv_dual_arm_dp3_inference.sh --check-config
 ```
+
+The check requires the configured checkpoint and local YAMLs, but exits before
+`robot.connect()` and does not open the RealSense pipeline. Normal inference can
+move the robot. The software migration and automated tests do not replace the
+operator-run RealSense-only, Flexiv connection, and final closed-loop tests.
+Codex did not run any hardware connection, camera pipeline, or live inference
+command while implementing this migration.
 
 See [docs/flexiv_dual_arm_inference.md](docs/flexiv_dual_arm_inference.md) for
 the parameter classification, runtime flow, and hardware stop behavior.

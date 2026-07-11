@@ -1,7 +1,8 @@
 # Flexiv Dual-Arm DP3 Inference
 
-This runtime follows the same operator model as Le-nero `run_policy`: edit the
-deployment YAML once, then start policy control with one command. The runtime
+This runtime is self-contained in this repository: edit the deployment YAML
+once, then start policy control with one command. It does not import an external
+robot framework or inject an external source tree into `sys.path`. The runtime
 mode is named `inference`; there is no staged no-send-to-motion handoff.
 
 ## Configuration Files
@@ -10,6 +11,36 @@ Two YAML files define the phase boundary:
 
 - Training: `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`
 - Inference: `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_inference_config.yaml`
+
+The live Flexiv adapter and RealSense RGB-D implementation are under
+`third_party/real/dual_flexiv_rizon4s/interface`. Offline conversion from an
+existing LeRobot dataset remains supported, but the live runtime does not
+require the LeRobot Python package or the external Le-nero checkout.
+
+## Standalone Runtime Setup
+
+Install only the robot-side packages that are not already provided by the DP3
+environment:
+
+```bash
+python -m pip install -r third_party/real/dual_flexiv_rizon4s/requirements-runtime.txt
+```
+
+The list is deliberately limited to NumPy, SciPy, headless OpenCV,
+`pyrealsense2`, `flexivrdk`, and `spdlog`; it does not install a separate robot
+framework or replace the DP3 Torch/CUDA stack.
+
+Create the private station configuration before running a config check or live
+inference:
+
+```bash
+cp third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.example.yaml \
+  third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml
+```
+
+Fill the robot, tool, and head-camera placeholders in the local file. The local
+file is gitignored so hardware serial numbers are not committed. To use another
+path, set `FLEXIV_DP3_ROBOT_CONFIG=/absolute/path/to/flexiv_runtime.yaml`.
 
 Both support the official `simple_dp3` and `dp3` policy classes through the
 `algorithm` field. The default deployment uses `simple_dp3` because the current
@@ -97,7 +128,7 @@ Review these fields in `dp3_inference_config.yaml` before starting:
 checkpoint:
   path: outputs/flexiv_dual_arm_head_xyz-simple_dp3_seed42/checkpoints/latest.ckpt
 robot:
-  config: ~/flexiv_ws/dual_arm_teleop/scripts/config/robots/flexiv_config.yaml
+  config: ${oc.env:FLEXIV_DP3_ROBOT_CONFIG,third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml}
 inference:
   gpu_id: 0
   duration_seconds: null  # Ctrl+C/stop file; use a positive number for a timed test
@@ -191,3 +222,17 @@ conda run -n dp3 bash scripts/run_flexiv_dual_arm_dp3_inference.sh --check-confi
 
 It loads the checkpoint, PointCloudBuilder, and Flexiv adapter configuration,
 then exits before `robot.connect()`.
+
+The configuration check still requires the referenced checkpoint, point-cloud
+YAML, and private robot YAML to exist. It constructs camera objects but does not
+open a RealSense pipeline, discover a named camera, or contact a robot.
+
+## Validation Boundary
+
+Code-only validation can cover imports, configuration, coherent RGB-D/IR frame
+conversion with fake framesets, feature schemas, cleanup, and fake RDK action
+dispatch. RealSense-only connection, Flexiv connection, and closed-loop policy
+inference remain operator-run hardware tests. Normal inference can move the
+robot; it must not be treated as a software-only smoke test. Codex did not run
+any hardware connection, camera pipeline, or live inference command during the
+standalone-runtime migration.

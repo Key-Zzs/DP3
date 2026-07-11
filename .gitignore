@@ -50,6 +50,7 @@ easytrain.sh
 nohup.out
 outputs/
 logs/
+third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml
 
 # tar files
 *.tar.gz

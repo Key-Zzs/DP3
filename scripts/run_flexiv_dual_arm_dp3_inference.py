@@ -10,7 +10,6 @@ import itertools
 import json
 import logging
 import math
-import os
 import site
 import sys
 import time
@@ -51,9 +50,8 @@ def _resolve_flexiv_interface_dir(repo_root: Path = REPO_ROOT) -> Path:
 
 
 FLEXIV_INTERFACE_DIR = _resolve_flexiv_interface_dir()
-DEFAULT_LEROBOT_SRC = Path(os.environ.get("LEROBOT_SRC", Path.home() / "flexiv_ws" / "Le-nero" / "src"))
 
-for path in (REPO_ROOT, DP3_ROOT, POINTCLOUD_BUILDER_ROOT, DEFAULT_LEROBOT_SRC):
+for path in (REPO_ROOT, DP3_ROOT, POINTCLOUD_BUILDER_ROOT):
     if path.exists():
         sys.path.insert(0, str(path))
 
@@ -161,7 +159,6 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         ckpt=_resolve_repo_path(checkpoint["path"]),
         pointcloud_config=_resolve_repo_path(pointcloud["config"]),
         robot_config=_resolve_repo_path(robot["config"]),
-        lerobot_src=_resolve_repo_path(robot.get("lerobot_src", DEFAULT_LEROBOT_SRC)),
         mode="inference",
         gpu_id=int(inference["gpu_id"]),
         device=str(inference["device"]),
@@ -327,7 +324,6 @@ def main() -> int:
     LOGGER.info("Loaded PointCloudBuilder config=%s device=%s", args.pointcloud_config, builder.device)
     artifacts = _artifact_audit(args)
 
-    _add_import_path(args.lerobot_src)
     if args.check_config:
         FlexivDualArmConfig, FlexivDualArm = _load_flexiv_interface(FLEXIV_INTERFACE_DIR)
         robot_config = _load_flexiv_config(FlexivDualArmConfig, args)
@@ -1792,14 +1788,6 @@ def _validate_adapter_feature_shape(
     return shape
 
 
-def _add_import_path(path: Path | None) -> None:
-    if path is None:
-        return
-    resolved = Path(path).expanduser()
-    if resolved.exists():
-        sys.path.insert(0, str(resolved))
-
-
 def _make_flexiv_robot(args: argparse.Namespace, builder: PointCloudBuilder):
     FlexivDualArmConfig, FlexivDualArm = _load_flexiv_interface(FLEXIV_INTERFACE_DIR)
     config = _load_flexiv_config(FlexivDualArmConfig, args)
@@ -1814,25 +1802,27 @@ def _make_flexiv_robot(args: argparse.Namespace, builder: PointCloudBuilder):
 
 
 def _load_flexiv_interface(interface_dir: Path):
-    package_name = "_dp3_flexiv_interface"
-    if package_name not in sys.modules:
-        package = types.ModuleType(package_name)
-        package.__path__ = [str(interface_dir)]  # type: ignore[attr-defined]
-        sys.modules[package_name] = package
+    package_name = _ensure_flexiv_interface_package(interface_dir)
     try:
         config_mod = importlib.import_module(f"{package_name}.config_flexiv")
         flexiv_mod = importlib.import_module(f"{package_name}.flexiv_dual_arm")
     except ModuleNotFoundError as exc:
         missing = exc.name or str(exc)
         raise RuntimeError(
-            "Flexiv adapter import failed because the current environment is missing "
-            f"`{missing}`. Run inference in an environment that has both DP3 and "
-            "Flexiv/LeRobot runtime dependencies, or install the missing robot-side "
-            "packages into the dp3 environment. The script can add LeRobot source "
-            "with --lerobot-src, but it cannot supply that source tree's Python "
-            "dependencies."
+            "Standalone Flexiv adapter import failed because the active environment "
+            f"is missing `{missing}`. Install the robot-side dependencies listed in "
+            "third_party/real/dual_flexiv_rizon4s/requirements-runtime.txt."
         ) from exc
     return config_mod.FlexivDualArmConfig, flexiv_mod.FlexivDualArm
+
+
+def _ensure_flexiv_interface_package(interface_dir: Path) -> str:
+    package_name = "_dp3_flexiv_interface"
+    if package_name not in sys.modules:
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(interface_dir)]  # type: ignore[attr-defined]
+        sys.modules[package_name] = package
+    return package_name
 
 
 def _load_flexiv_config(FlexivDualArmConfig: Any, args: argparse.Namespace):
@@ -1952,21 +1942,17 @@ def _bounded_float(value: Any, *, label: str, minimum: float, maximum: float) ->
 
 
 def _make_realsense_config(*, serial_number_or_name: str, width: int, height: int, fps: int):
-    try:
-        from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
-    except ImportError:  # pragma: no cover - depends on LeRobot version
-        from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
-    from lerobot.cameras.configs import ColorMode, Cv2Rotation
-
-    return RealSenseCameraConfig(
+    package_name = _ensure_flexiv_interface_package(FLEXIV_INTERFACE_DIR)
+    camera_mod = importlib.import_module(f"{package_name}.realsense_camera")
+    return camera_mod.RealSenseCameraConfig(
         serial_number_or_name=serial_number_or_name,
         fps=fps,
         width=width,
         height=height,
-        color_mode=ColorMode.RGB,
+        color_mode=camera_mod.ColorMode.RGB,
         use_depth=True,
         use_ir=False,
-        rotation=Cv2Rotation.NO_ROTATION,
+        rotation=camera_mod.Cv2Rotation.NO_ROTATION,
     )
 
 

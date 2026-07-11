@@ -1,0 +1,8 @@
+# Standalone Flexiv dual-arm DP3 runtime dependencies.
+# The DP3 environment already owns its Torch/CUDA dependency set.
+numpy
+scipy
+opencv-python-headless
+pyrealsense2
+flexivrdk
+spdlog

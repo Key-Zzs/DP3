@@ -79,8 +79,9 @@ checkpoint:
   path: outputs/flexiv_dual_arm_head_xyz-simple_dp3_seed42/checkpoints/latest.ckpt
 
 robot:
-  config: ~/flexiv_ws/dual_arm_teleop/scripts/config/robots/flexiv_config.yaml
-  lerobot_src: ~/flexiv_ws/Le-nero/src
+  # Copy flexiv_runtime.example.yaml to the gitignored local path, fill the
+  # hardware serials, or override this with FLEXIV_DP3_ROBOT_CONFIG.
+  config: ${oc.env:FLEXIV_DP3_ROBOT_CONFIG,third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml}
   switch_cartesian_mode_on_connect: true
   allow_connect_motion: false
   camera_name: head_rgb

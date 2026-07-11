@@ -4,18 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from lerobot.cameras import CameraConfig
-from lerobot.robots.config import RobotConfig
+from .realsense_camera import RealSenseCameraConfig
 
 
-@RobotConfig.register_subclass("flexiv_dual_arm")
 @dataclass
-class FlexivDualArmConfig(RobotConfig):
+class FlexivDualArmConfig:
     """Dual Flexiv Rizon4s robot configuration.
 
     Flexiv RDK connects by robot serial number, for example
     ``Rizon4s-123456``. Fill ``left_robot_sn`` and ``right_robot_sn`` in
-    ``scripts/config/robots/flexiv_config.yaml`` before connecting hardware.
+    the private local Flexiv runtime YAML before connecting hardware.
     """
 
     name: str = "flexiv_dual_arm"
@@ -84,7 +82,7 @@ class FlexivDualArmConfig(RobotConfig):
     right_mount_yaw_deg: float = 0.0
 
     num_joints_per_arm: int = 7
-    cameras: dict[str, CameraConfig] = field(default_factory=dict)
+    cameras: dict[str, RealSenseCameraConfig] = field(default_factory=dict)
     camera_read_timeout_ms: int = 1000
     camera_warmup_attempts: int = 10
     camera_hardware_reset_on_connect: bool = False
@@ -103,3 +101,17 @@ class FlexivDualArmConfig(RobotConfig):
     reset_opens_grippers: bool = False
     go_home_duration_sec: float | None = None
     go_home_rate_hz: float | None = None
+
+    def __post_init__(self) -> None:
+        for name, camera in self.cameras.items():
+            if not isinstance(camera, RealSenseCameraConfig):
+                raise TypeError(
+                    f"Camera {name!r} must use RealSenseCameraConfig, "
+                    f"got {type(camera).__name__}"
+                )
+            for attr in ("width", "height", "fps"):
+                value = getattr(camera, attr)
+                if value is None:
+                    raise ValueError(
+                        f"Camera {name!r} requires a configured {attr} for Flexiv runtime use"
+                    )
