@@ -1,5 +1,6 @@
 from typing import Any, Dict
 import copy
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +125,12 @@ def _validate_zarr_schema(
         raise FileNotFoundError(path)
 
     root = zarr.open(str(path), mode="r")
+    export_status = root.attrs.get("export_status")
+    if export_status != "complete":
+        raise ValueError(
+            f"Zarr export is not complete: export_status={export_status!r}; "
+            "re-export the dataset before training"
+        )
     if "data" not in root:
         raise KeyError("Missing zarr group: data")
     if "meta" not in root:
@@ -150,6 +157,14 @@ def _validate_zarr_schema(
         raise ValueError(f"data/point_cloud must be T x N x C, got {point_cloud.shape}")
 
     total_steps = int(state.shape[0])
+    expected_total_frames = int(root.attrs.get("expected_total_frames", -1))
+    converted_frames = int(root.attrs.get("converted_frames", -1))
+    if expected_total_frames != total_steps or converted_frames != total_steps:
+        raise ValueError(
+            "Zarr completion metadata does not match data length: "
+            f"T={total_steps}, expected_total_frames={expected_total_frames}, "
+            f"converted_frames={converted_frames}"
+        )
     if int(action.shape[0]) != total_steps:
         raise ValueError(
             f"data/action length {action.shape[0]} does not match state length {total_steps}"
@@ -184,9 +199,38 @@ def _validate_zarr_schema(
     if expected_num_points is not None and int(point_cloud.shape[1]) != int(expected_num_points):
         raise ValueError(f"data/point_cloud points {point_cloud.shape[1]} != {expected_num_points}")
 
+    integrity = root.attrs.get("integrity")
+    if not isinstance(integrity, dict):
+        raise ValueError("Zarr export is missing integrity checksums")
+    for key, array in (
+        ("state", state),
+        ("action", action),
+        ("point_cloud", point_cloud),
+    ):
+        expected_hash = integrity.get(key)
+        if not isinstance(expected_hash, str):
+            raise ValueError(f"Zarr export is missing data/{key} checksum")
+        actual_hash = _zarr_array_sha256(array)
+        if actual_hash != expected_hash:
+            raise ValueError(
+                f"Zarr data/{key} checksum mismatch: "
+                f"actual={actual_hash}, expected={expected_hash}"
+            )
+
     return {
         "state_shape": tuple(state.shape),
         "action_shape": tuple(action.shape),
         "point_cloud_shape": tuple(point_cloud.shape),
         "episode_ends": episode_ends.tolist(),
     }
+
+
+def _zarr_array_sha256(array: Any) -> str:
+    hasher = hashlib.sha256()
+    rows_per_chunk = int(array.chunks[0]) if array.chunks else 128
+    for start in range(0, int(array.shape[0]), rows_per_chunk):
+        chunk = np.ascontiguousarray(array[start : start + rows_per_chunk])
+        if np.issubdtype(chunk.dtype, np.floating) and not np.isfinite(chunk).all():
+            raise ValueError(f"Zarr array contains NaN or Inf near frame {start}")
+        hasher.update(chunk.tobytes())
+    return hasher.hexdigest()

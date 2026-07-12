@@ -9,6 +9,8 @@ The supported zarr contract is:
 - `data/action`: `(T, 14)` float32 delta action
 - `data/point_cloud`: `(T, 1024, 3)` for `xyz`, or `(T, 1024, 6)` for `xyzrgb`
 - `meta/episode_ends`: cumulative episode end indices, with the last value equal to `T`
+- root attrs: `export_status=complete`, matching `expected_total_frames` and
+  `converted_frames`, plus SHA-256 entries for all three training arrays
 
 State semantics are the recorded Flexiv observation vector:
 
@@ -41,119 +43,100 @@ conda run -n dp3 python tools/inspect_dp3_zarr.py \
 
 For `xyzrgb`, change `--expected-pointcloud-dim 6`.
 
-## Train XYZ
+The exporter writes to a hidden temporary sibling and only commits the final
+zarr after every frame and checksum passes. The inspector and the training
+dataset both reject incomplete metadata or checksum mismatches.
 
-```bash
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyz \
-  /path/to/flexiv_head_xyz.zarr \
-  simple_dp3 \
-  0 \
-  42
+## Configure Training
+
+All launcher and training parameters are configured in
+`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`.
+For an XYZ SimpleDP3 run, review at least:
+
+```yaml
+defaults:
+  - task: real/flexiv_dual_arm_head_xyz
+
+launcher:
+  gpu_id: 0
+  overwrite: false
+
+algorithm: simple_dp3
+task:
+  dataset:
+    zarr_path: /absolute/path/to/flexiv_head_xyz.zarr
+    max_train_episodes: 90
+
+training:
+  device: cuda:0
+  seed: 42
+  resume: false
+
+logging:
+  mode: online
+
+checkpoint:
+  save_ckpt: true
 ```
 
-Equivalent direct Hydra override:
+Use `algorithm: dp3` for the full DP3 model. For XYZRGB, change the default
+task to `real/flexiv_dual_arm_head_xyzrgb` and point `zarr_path` at the XYZRGB
+dataset. `policy.use_pc_color` and the encoder input channels are derived from
+the selected task automatically.
+
+`launcher.gpu_id` is the physical GPU exposed through `CUDA_VISIBLE_DEVICES`.
+Keep `training.device: cuda:0` so the process uses that selected device.
+Prefer an absolute zarr path because `train.py` changes its working directory
+during startup.
+
+## Start Training
+
+After activating the environment, the launcher takes no training arguments:
 
 ```bash
-cd 3D-Diffusion-Policy
-HYDRA_FULL_ERROR=1 python train.py --config-name=dp3_train_config.yaml \
-  algorithm=simple_dp3 \
-  task=real/flexiv_dual_arm_head_xyz \
-  task.dataset.zarr_path=/path/to/flexiv_head_xyz.zarr \
-  hydra.run.dir=3D-Diffusion-Policy/outputs/flexiv_dual_arm_head_xyz-simple_dp3_seed42 \
-  training.device=cuda:0 \
-  logging.mode=offline
+conda activate dp3
+bash scripts/train_flexiv_dual_arm_dp3.sh
 ```
 
-## Train XYZRGB
-
-Use the `xyzrgb` task and enable point-cloud color:
-
-```bash
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyzrgb \
-  /path/to/flexiv_head_xyzrgb.zarr \
-  simple_dp3 \
-  0 \
-  42
-```
-
-The wrapper passes `policy.use_pc_color=true` and configures the point-cloud
-encoder for 6 input channels.
+The YAML `run_dir` controls the Hydra output directory. Checkpoints are stored
+under `<run_dir>/checkpoints/`. If that directory already exists, the launcher
+fails before training. Change `run_dir` or `exp_name` for a fresh run. Set
+`launcher.overwrite: true` only when the entire old run directory should be
+deleted first. To continue an interrupted run, set `training.resume: true`
+while keeping `launcher.overwrite: false`; the launcher requires an existing
+`checkpoints/latest.ckpt`, and training resumes at the next epoch. The last
+configured epoch is always checkpointed even when it is not divisible by
+`checkpoint_every`.
 
 ## Sanity Overfit
 
-Run a short one-episode sanity pass before full training:
+For a short one-episode sanity pass, temporarily reduce these YAML sections:
 
-```bash
-DEBUG=True \
-SAVE_CKPT=False \
-WANDB_MODE=disabled \
-MAX_TRAIN_EPISODES=1 \
-BATCH_SIZE=1 \
-NUM_WORKERS=0 \
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyz \
-  /path/to/flexiv_head_xyz.zarr \
-  simple_dp3 \
-  0 \
-  42 \
-  training.num_epochs=1 \
-  training.max_train_steps=1 \
-  training.use_ema=False \
-  training.sample_every=999999 \
-  hydra.run.dir=3D-Diffusion-Policy/outputs/dp3_flexiv_sanity_xyz
+```yaml
+task:
+  dataset:
+    max_train_episodes: 1
+
+dataloader:
+  batch_size: 1
+  num_workers: 0
+val_dataloader:
+  batch_size: 1
+  num_workers: 0
+
+training:
+  num_epochs: 1
+  max_train_steps: 1
+  use_ema: false
+
+logging:
+  mode: disabled
+checkpoint:
+  save_ckpt: false
 ```
 
-For a smaller non-debug run:
-
-```bash
-cd 3D-Diffusion-Policy
-HYDRA_FULL_ERROR=1 python train.py --config-name=dp3_train_config.yaml \
-  algorithm=simple_dp3 \
-  task=real/flexiv_dual_arm_head_xyz \
-  task.dataset.zarr_path=/path/to/flexiv_head_xyz.zarr \
-  task.dataset.max_train_episodes=1 \
-  dataloader.batch_size=1 \
-  dataloader.num_workers=0 \
-  val_dataloader.batch_size=1 \
-  val_dataloader.num_workers=0 \
-  training.num_epochs=1 \
-  training.max_train_steps=1 \
-  training.device=cuda:0 \
-  logging.mode=disabled \
-  checkpoint.save_ckpt=False \
-  hydra.run.dir=3D-Diffusion-Policy/outputs/dp3_flexiv_sanity_xyz_direct
-```
-
-## Full Training
-
-For full training, keep `DEBUG=False` and `SAVE_CKPT=True`:
-
-```bash
-SAVE_CKPT=True WANDB_MODE=offline conda run -n dp3 bash \
-  scripts/train_flexiv_dual_arm_dp3.sh \
-  xyz \
-  /path/to/flexiv_head_xyz.zarr \
-  simple_dp3 \
-  0 \
-  42
-```
-
-Checkpoints are written under the Hydra output directory. The wrapper default
-is this repository-relative path:
-
-```text
-outputs/<exp_name>_seed<seed>/checkpoints/
-```
-
-The wrapper refuses to start if the target output directory already exists.
-Use a different `RUN_DIR`/`EXP_NAME`, or add `--overwrite` to delete the entire
-target output directory before training. This avoids ambiguous leftover
-checkpoints from an older run.
-
-`train.py` changes its working directory during startup, so prefer absolute
-`zarr_path` values.
+Then run the same zero-argument command. Restore the full-training values and
+choose a new `exp_name` before the real run.
 
 ## Current Boundary
 

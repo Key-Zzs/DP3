@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from export_lerobot_to_dp3_zarr import verify_dp3_zarr
+
 
 REQUIRED_DATA_KEYS = ["state", "action", "point_cloud"]
 
@@ -31,6 +33,7 @@ def inspect_dp3_zarr(
     if not path.exists():
         raise FileNotFoundError(path)
     root = zarr.open(str(path), mode="r")
+    verified_integrity = verify_dp3_zarr(path)
     if "data" not in root:
         raise KeyError("Missing zarr group: data")
     if "meta" not in root:
@@ -96,6 +99,7 @@ def inspect_dp3_zarr(
         },
         "fixed_size_point_cloud": True,
         "attrs": dict(root.attrs),
+        "verified_integrity": verified_integrity,
         "expected_checks": {
             "state_dim": expected_state_dim,
             "action_dim": expected_action_dim,
@@ -148,6 +152,7 @@ def _print_summary(summary: dict[str, Any]) -> None:
         f"values={episode['values']}"
     )
     print(f"fixed_size_point_cloud: {summary['fixed_size_point_cloud']}")
+    print(f"verified_integrity: {summary['verified_integrity']}")
     expected = {key: value for key, value in summary["expected_checks"].items() if value is not None}
     if expected:
         print(f"expected_checks: {expected}")

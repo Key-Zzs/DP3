@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -46,6 +48,12 @@ STATE_DIM = 28
 ACTION_DIM = 14
 DEFAULT_OUTPUT_ROOT = Path.home() / ".cache" / "dp3_zarr"
 LEROBOT_CACHE_ROOT = Path.home() / ".cache" / "huggingface" / "lerobot"
+EXPORT_STATUS_ATTR = "export_status"
+EXPORT_STATUS_IN_PROGRESS = "in_progress"
+EXPORT_STATUS_COMPLETE = "complete"
+EXPECTED_FRAMES_ATTR = "expected_total_frames"
+CONVERTED_FRAMES_ATTR = "converted_frames"
+INTEGRITY_ATTR = "integrity"
 
 
 def build_pointcloud_builder_config(
@@ -168,24 +176,48 @@ def write_dp3_zarr(
     overwrite: bool = False,
 ) -> None:
     """Write complete in-memory arrays to a DP3-compatible zarr store."""
-
-    arrays = _create_output_arrays(
-        Path(output_zarr),
-        total_frames=int(state.shape[0]),
-        num_points=int(point_cloud.shape[1]),
-        pointcloud_dim=int(point_cloud.shape[2]),
-        state_dim=int(state.shape[1]),
-        action_dim=int(action.shape[1]),
-        episode_ends=episode_ends,
-        attrs=attrs,
-        img_shape=tuple(img.shape[1:]) if img is not None else None,
-        overwrite=overwrite,
+    output_path = Path(output_zarr).expanduser()
+    work_path = _prepare_atomic_output(output_path, overwrite=overwrite)
+    total_frames = int(state.shape[0])
+    export_attrs = dict(attrs)
+    export_attrs.update(
+        {
+            EXPORT_STATUS_ATTR: EXPORT_STATUS_IN_PROGRESS,
+            EXPECTED_FRAMES_ATTR: total_frames,
+        }
     )
-    arrays["state"][:] = state.astype(np.float32, copy=False)
-    arrays["action"][:] = action.astype(np.float32, copy=False)
-    arrays["point_cloud"][:] = point_cloud.astype(np.float32, copy=False)
-    if img is not None and "img" in arrays:
-        arrays["img"][:] = img.astype(np.uint8, copy=False)
+    try:
+        arrays = _create_output_arrays(
+            work_path,
+            total_frames=total_frames,
+            num_points=int(point_cloud.shape[1]),
+            pointcloud_dim=int(point_cloud.shape[2]),
+            state_dim=int(state.shape[1]),
+            action_dim=int(action.shape[1]),
+            episode_ends=episode_ends,
+            attrs=export_attrs,
+            img_shape=tuple(img.shape[1:]) if img is not None else None,
+            overwrite=False,
+        )
+        arrays["state"][:] = state.astype(np.float32, copy=False)
+        arrays["action"][:] = action.astype(np.float32, copy=False)
+        arrays["point_cloud"][:] = point_cloud.astype(np.float32, copy=False)
+        if img is not None and "img" in arrays:
+            arrays["img"][:] = img.astype(np.uint8, copy=False)
+        integrity = _verify_written_arrays(
+            work_path,
+            expected_frames=total_frames,
+            expected_hashes={
+                "state": _numpy_sha256(state, dtype=np.float32),
+                "action": _numpy_sha256(action, dtype=np.float32),
+                "point_cloud": _numpy_sha256(point_cloud, dtype=np.float32),
+            },
+        )
+        _mark_export_complete(work_path, converted_frames=total_frames, integrity=integrity)
+        _commit_atomic_output(work_path, output_path, overwrite=overwrite)
+    except BaseException:
+        _remove_path(work_path)
+        raise
 
 
 def default_output_zarr_path(
@@ -215,6 +247,7 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
 
     info = _read_json(lerobot_path / "meta" / "info.json")
     output_zarr = _resolve_output_zarr(args, lerobot_path=lerobot_path, info=info)
+    work_zarr = _prepare_atomic_output(output_zarr, overwrite=args.overwrite)
     data_paths = _data_parquet_paths(lerobot_path)
     total_frames = _count_parquet_rows(data_paths)
     episode_rows = _read_episode_rows(lerobot_path)
@@ -247,79 +280,116 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
         action_dim=ACTION_DIM,
         pointcloud_dim=pointcloud_dim,
     )
-    arrays = _create_output_arrays(
-        output_zarr,
-        total_frames=frames_to_export,
-        num_points=args.num_points,
-        pointcloud_dim=pointcloud_dim,
-        state_dim=STATE_DIM,
-        action_dim=ACTION_DIM,
-        episode_ends=episode_ends,
-        attrs=attrs,
-        img_shape=img_shape,
-        overwrite=args.overwrite,
-    )
-
-    camera_spec = CAMERA_SPECS[args.camera]
-    need_rgb = args.pointcloud_mode == "xyzrgb" or args.save_img
-    video_paths = _video_paths(lerobot_path, camera_spec["video_key"]) if need_rgb else []
-    rgb_iter = iter_video_frames(video_paths) if need_rgb else None
-    columns = [
-        STATE_COLUMN,
-        ACTION_COLUMN,
-        camera_spec["depth_column"],
-        "global_frame_index",
-        camera_spec["timestamp_column"],
-        camera_spec["reused_column"],
-        "episode_index",
-        "frame_index",
-        "index",
-    ]
-
-    reused_count = 0
-    converted = 0
-    for row, source_path in iter_lerobot_rows(
-        data_paths,
-        columns=columns,
-        max_frames=frames_to_export,
-    ):
-        state = _as_vector(row[STATE_COLUMN], STATE_DIM, STATE_COLUMN, source_path)
-        action = _as_vector(row[ACTION_COLUMN], ACTION_DIM, ACTION_COLUMN, source_path)
-        _reject_nonfinite(state, STATE_COLUMN, converted)
-        _reject_nonfinite(action, ACTION_COLUMN, converted)
-        depth = _as_depth(row[camera_spec["depth_column"]], camera_spec["depth_column"], source_path)
-        rgb = next(rgb_iter) if rgb_iter is not None else None
-
-        frame = {
-            "depth": depth,
-            "timestamp": row[camera_spec["timestamp_column"]],
-            "global_frame_index": row["global_frame_index"],
+    attrs.update(
+        {
+            EXPORT_STATUS_ATTR: EXPORT_STATUS_IN_PROGRESS,
+            EXPECTED_FRAMES_ATTR: frames_to_export,
+            "source_total_frames": total_frames,
+            "source_fps": info.get("fps"),
         }
-        if rgb is not None:
-            frame["rgb"] = rgb
-        pc_tensor, _meta = builder.from_recorded_frame(frame)
-        point_cloud = pc_tensor.detach().cpu().numpy().astype(np.float32, copy=False)
-        _validate_point_cloud(point_cloud, args.num_points, pointcloud_dim, converted)
-        _reject_nonfinite(point_cloud, "point_cloud", converted)
+    )
+    try:
+        arrays = _create_output_arrays(
+            work_zarr,
+            total_frames=frames_to_export,
+            num_points=args.num_points,
+            pointcloud_dim=pointcloud_dim,
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            episode_ends=episode_ends,
+            attrs=attrs,
+            img_shape=img_shape,
+            overwrite=False,
+        )
 
-        arrays["state"][converted] = state
-        arrays["action"][converted] = action
-        arrays["point_cloud"][converted] = point_cloud
-        if args.save_img:
-            if rgb is None:
-                raise RuntimeError("--save-img requested but RGB video frame was not decoded")
-            arrays["img"][converted] = rgb
+        camera_spec = CAMERA_SPECS[args.camera]
+        need_rgb = args.pointcloud_mode == "xyzrgb" or args.save_img
+        video_paths = _video_paths(lerobot_path, camera_spec["video_key"]) if need_rgb else []
+        rgb_iter = iter_video_frames(video_paths) if need_rgb else None
+        columns = [
+            STATE_COLUMN,
+            ACTION_COLUMN,
+            camera_spec["depth_column"],
+            "global_frame_index",
+            camera_spec["timestamp_column"],
+            camera_spec["reused_column"],
+            "episode_index",
+            "frame_index",
+            "index",
+        ]
 
-        reused_count += int(bool(row[camera_spec["reused_column"]]))
-        converted += 1
-        if args.verbose and (converted == 1 or converted % 25 == 0 or converted == frames_to_export):
-            print(
-                f"[export] {converted}/{frames_to_export} frames, "
-                f"pc={point_cloud.shape}, reused={reused_count}"
+        reused_count = 0
+        converted = 0
+        source_hashers = {
+            "state": hashlib.sha256(),
+            "action": hashlib.sha256(),
+            "point_cloud": hashlib.sha256(),
+        }
+        for row, source_path in iter_lerobot_rows(
+            data_paths,
+            columns=columns,
+            max_frames=frames_to_export,
+        ):
+            state = _as_vector(row[STATE_COLUMN], STATE_DIM, STATE_COLUMN, source_path)
+            action = _as_vector(row[ACTION_COLUMN], ACTION_DIM, ACTION_COLUMN, source_path)
+            _reject_nonfinite(state, STATE_COLUMN, converted)
+            _reject_nonfinite(action, ACTION_COLUMN, converted)
+            depth = _as_depth(
+                row[camera_spec["depth_column"]],
+                camera_spec["depth_column"],
+                source_path,
             )
+            rgb = next(rgb_iter) if rgb_iter is not None else None
 
-    if converted != frames_to_export:
-        raise RuntimeError(f"Converted {converted} frames but expected {frames_to_export}")
+            frame = {
+                "depth": depth,
+                "timestamp": row[camera_spec["timestamp_column"]],
+                "global_frame_index": row["global_frame_index"],
+            }
+            if rgb is not None:
+                frame["rgb"] = rgb
+            pc_tensor, _meta = builder.from_recorded_frame(frame)
+            point_cloud = pc_tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+            _validate_point_cloud(point_cloud, args.num_points, pointcloud_dim, converted)
+            _reject_nonfinite(point_cloud, "point_cloud", converted)
+
+            arrays["state"][converted] = state
+            arrays["action"][converted] = action
+            arrays["point_cloud"][converted] = point_cloud
+            source_hashers["state"].update(np.ascontiguousarray(state).tobytes())
+            source_hashers["action"].update(np.ascontiguousarray(action).tobytes())
+            source_hashers["point_cloud"].update(np.ascontiguousarray(point_cloud).tobytes())
+            if args.save_img:
+                if rgb is None:
+                    raise RuntimeError("--save-img requested but RGB video frame was not decoded")
+                arrays["img"][converted] = rgb
+
+            reused_count += int(bool(row[camera_spec["reused_column"]]))
+            converted += 1
+            if args.verbose and (
+                converted == 1 or converted % 25 == 0 or converted == frames_to_export
+            ):
+                print(
+                    f"[export] {converted}/{frames_to_export} frames, "
+                    f"pc={point_cloud.shape}, reused={reused_count}"
+                )
+
+        if converted != frames_to_export:
+            raise RuntimeError(f"Converted {converted} frames but expected {frames_to_export}")
+        integrity = _verify_written_arrays(
+            work_zarr,
+            expected_frames=frames_to_export,
+            expected_hashes={name: hasher.hexdigest() for name, hasher in source_hashers.items()},
+        )
+        _mark_export_complete(
+            work_zarr,
+            converted_frames=converted,
+            integrity=integrity,
+        )
+        _commit_atomic_output(work_zarr, output_zarr, overwrite=args.overwrite)
+    except BaseException:
+        _remove_path(work_zarr)
+        raise
 
     summary = {
         "total_frames": converted,
@@ -334,6 +404,42 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
     }
     _print_summary(summary)
     return summary
+
+
+def verify_dp3_zarr(zarr_path: str | Path) -> dict[str, Any]:
+    """Verify completion metadata, shapes, finiteness, and stored array hashes."""
+
+    try:
+        import zarr
+    except ImportError as exc:
+        raise ImportError("zarr is required to verify DP3 replay buffers") from exc
+
+    path = Path(zarr_path).expanduser()
+    root = zarr.open(str(path), mode="r")
+    status = root.attrs.get(EXPORT_STATUS_ATTR)
+    if status != EXPORT_STATUS_COMPLETE:
+        raise ValueError(
+            f"Zarr export is not complete: {EXPORT_STATUS_ATTR}={status!r}, "
+            f"expected {EXPORT_STATUS_COMPLETE!r}"
+        )
+    expected_frames = int(root.attrs.get(EXPECTED_FRAMES_ATTR, -1))
+    converted_frames = int(root.attrs.get(CONVERTED_FRAMES_ATTR, -1))
+    if expected_frames <= 0 or converted_frames != expected_frames:
+        raise ValueError(
+            f"Invalid export frame metadata: expected={expected_frames}, "
+            f"converted={converted_frames}"
+        )
+    stored_integrity = root.attrs.get(INTEGRITY_ATTR)
+    if not isinstance(stored_integrity, dict):
+        raise ValueError(f"Missing zarr integrity metadata: {INTEGRITY_ATTR}")
+    return _verify_written_arrays(
+        path,
+        expected_frames=expected_frames,
+        expected_hashes={
+            name: str(stored_integrity[name])
+            for name in ("state", "action", "point_cloud")
+        },
+    )
 
 
 def iter_lerobot_rows(
@@ -509,6 +615,121 @@ def _create_output_arrays(
             compressor=compressor,
         )
     return arrays
+
+
+def _prepare_atomic_output(output_zarr: Path, *, overwrite: bool) -> Path:
+    output_zarr = output_zarr.expanduser()
+    if output_zarr.exists() and not overwrite:
+        raise FileExistsError(f"Output zarr already exists: {output_zarr}")
+    output_zarr.parent.mkdir(parents=True, exist_ok=True)
+    work_path = output_zarr.with_name(f".{output_zarr.name}.incomplete-{os.getpid()}")
+    _remove_path(work_path)
+    return work_path
+
+
+def _commit_atomic_output(work_path: Path, output_path: Path, *, overwrite: bool) -> None:
+    if not work_path.is_dir():
+        raise FileNotFoundError(f"Incomplete export directory does not exist: {work_path}")
+    output_path = output_path.expanduser()
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Output zarr already exists: {output_path}")
+
+    backup_path = output_path.with_name(f".{output_path.name}.backup-{os.getpid()}")
+    _remove_path(backup_path)
+    if output_path.exists():
+        output_path.rename(backup_path)
+    try:
+        work_path.rename(output_path)
+    except BaseException:
+        if backup_path.exists() and not output_path.exists():
+            backup_path.rename(output_path)
+        raise
+    else:
+        _remove_path(backup_path)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _numpy_sha256(array: np.ndarray, *, dtype: Any) -> str:
+    contiguous = np.ascontiguousarray(array, dtype=dtype)
+    return hashlib.sha256(contiguous.tobytes()).hexdigest()
+
+
+def _zarr_array_sha256(array: Any) -> str:
+    hasher = hashlib.sha256()
+    rows_per_chunk = int(array.chunks[0]) if array.chunks else 128
+    for start in range(0, int(array.shape[0]), rows_per_chunk):
+        chunk = np.ascontiguousarray(array[start : start + rows_per_chunk])
+        hasher.update(chunk.tobytes())
+    return hasher.hexdigest()
+
+
+def _verify_written_arrays(
+    zarr_path: Path,
+    *,
+    expected_frames: int,
+    expected_hashes: dict[str, str],
+) -> dict[str, str]:
+    try:
+        import zarr
+    except ImportError as exc:
+        raise ImportError("zarr is required to verify DP3 replay buffers") from exc
+
+    root = zarr.open(str(zarr_path), mode="r")
+    for group_name in ("data", "meta"):
+        if group_name not in root:
+            raise ValueError(f"Missing zarr group: {group_name}")
+    for name in ("state", "action", "point_cloud"):
+        if name not in root["data"]:
+            raise ValueError(f"Missing zarr array: data/{name}")
+        array = root["data"][name]
+        if int(array.shape[0]) != int(expected_frames):
+            raise ValueError(
+                f"data/{name} has {array.shape[0]} frames, expected {expected_frames}"
+            )
+        actual_hash = _zarr_array_sha256(array)
+        expected_hash = expected_hashes.get(name)
+        if actual_hash != expected_hash:
+            raise ValueError(
+                f"data/{name} checksum mismatch: actual={actual_hash}, expected={expected_hash}"
+            )
+
+    episode_ends = np.asarray(root["meta"]["episode_ends"][:], dtype=np.int64)
+    if episode_ends.ndim != 1 or episode_ends.size == 0:
+        raise ValueError("meta/episode_ends must be a non-empty vector")
+    if not np.all(np.diff(episode_ends) > 0):
+        raise ValueError("meta/episode_ends must be strictly increasing")
+    if int(episode_ends[-1]) != int(expected_frames):
+        raise ValueError(
+            f"episode_ends[-1]={episode_ends[-1]} does not match {expected_frames} frames"
+        )
+    return {name: expected_hashes[name] for name in ("state", "action", "point_cloud")}
+
+
+def _mark_export_complete(
+    zarr_path: Path,
+    *,
+    converted_frames: int,
+    integrity: dict[str, str],
+) -> None:
+    try:
+        import zarr
+    except ImportError as exc:
+        raise ImportError("zarr is required to finalize DP3 replay buffers") from exc
+
+    root = zarr.open(str(zarr_path), mode="a")
+    root.attrs.update(
+        {
+            CONVERTED_FRAMES_ATTR: int(converted_frames),
+            INTEGRITY_ATTR: _jsonable(integrity),
+            EXPORT_STATUS_ATTR: EXPORT_STATUS_COMPLETE,
+        }
+    )
 
 
 def _zarr_attrs(

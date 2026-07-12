@@ -4,85 +4,25 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bash scripts/train_flexiv_dual_arm_dp3.sh <xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...] [--overwrite]
+  bash scripts/train_flexiv_dual_arm_dp3.sh
 
-Options:
-  --overwrite
-      Delete the whole target Hydra output directory before training if it already exists.
-      Without this flag, an existing output directory is treated as an error.
-
-Environment overrides:
-  DEBUG=False|True
-  SAVE_CKPT=True|False
-  WANDB_MODE=offline|online|disabled
-  DEVICE=cuda:0|cpu
-  MAX_TRAIN_EPISODES=90|null
-  BATCH_SIZE=128
-  NUM_WORKERS=8
-  EXP_NAME=<name>
-  RUN_DIR=<hydra output dir>
-
-Default checkpoint directory, relative to this repository:
-  outputs/<exp_name>_seed<seed>/checkpoints/
-
-Training hyperparameters:
+Configure the task, zarr path, algorithm, physical GPU, output directory,
+WandB, dataloaders, optimizer, training, and checkpoint behavior in:
   3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml
+
+launcher.overwrite=false rejects an existing run directory unless
+training.resume=true and checkpoints/latest.ckpt exists. Set overwrite=true
+only when the entire existing run directory should be deleted before training.
 USAGE
 }
 
-OVERWRITE=false
-POSITIONAL_ARGS=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --overwrite)
-      OVERWRITE=true
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      POSITIONAL_ARGS+=("$1")
-      shift
-      ;;
-  esac
-done
-set -- "${POSITIONAL_ARGS[@]}"
-
-if [[ $# -lt 2 ]]; then
+if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
   usage
-  exit 2
+  exit 0
 fi
 
-MODE="$1"
-ZARR_PATH="$2"
-ALG_NAME="${3:-simple_dp3}"
-GPU_ID="${4:-0}"
-SEED="${5:-42}"
-EXTRA_ARGS=()
-if [[ $# -gt 5 ]]; then
-  EXTRA_ARGS=("${@:6}")
-fi
-
-case "${MODE}" in
-  xyz)
-    TASK_CONFIG="real/flexiv_dual_arm_head_xyz"
-    USE_PC_COLOR=false
-    PC_IN_CHANNELS=3
-    ;;
-  xyzrgb)
-    TASK_CONFIG="real/flexiv_dual_arm_head_xyzrgb"
-    USE_PC_COLOR=true
-    PC_IN_CHANNELS=6
-    ;;
-  *)
-    usage
-    exit 2
-    ;;
-esac
-
-if [[ "${ALG_NAME}" != "simple_dp3" && "${ALG_NAME}" != "dp3" ]]; then
+if [[ $# -ne 0 ]]; then
+  echo "This launcher no longer accepts training arguments; edit dp3_train_config.yaml instead." >&2
   usage
   exit 2
 fi
@@ -90,25 +30,80 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 HYDRA_BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
+CONFIG_PATH="${REPO_ROOT}/3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml"
 
-DEBUG="${DEBUG:-False}"
-SAVE_CKPT="${SAVE_CKPT:-True}"
-WANDB_MODE="${WANDB_MODE:-offline}"
-DEVICE="${DEVICE:-cuda:0}"
-MAX_TRAIN_EPISODES="${MAX_TRAIN_EPISODES:-90}"
-BATCH_SIZE="${BATCH_SIZE:-128}"
-NUM_WORKERS="${NUM_WORKERS:-8}"
-EXP_NAME="${EXP_NAME:-flexiv_dual_arm_head_${MODE}-${ALG_NAME}}"
-# train.py changes cwd to the parent workspace before Hydra resolves run.dir.
-# Keep this relative path pointed at this repository's outputs directory.
-RUN_DIR="${RUN_DIR:-3D-Diffusion-Policy/outputs/${EXP_NAME}_seed${SEED}}"
-for extra_arg in "${EXTRA_ARGS[@]}"; do
-  case "${extra_arg}" in
-    hydra.run.dir=*)
-      RUN_DIR="${extra_arg#hydra.run.dir=}"
-      ;;
-  esac
-done
+CONFIG_VALUES="$(python - "${CONFIG_PATH}" <<'PY'
+import pathlib
+import sys
+
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
+
+config_path = pathlib.Path(sys.argv[1])
+with initialize_config_dir(version_base=None, config_dir=str(config_path.parent)):
+    cfg = compose(config_name=config_path.stem)
+
+required = (
+    "launcher.gpu_id",
+    "launcher.overwrite",
+    "training.resume",
+    "algorithm",
+    "task.dataset.zarr_path",
+    "run_dir",
+)
+missing = [key for key in required if OmegaConf.select(cfg, key) is None]
+if missing:
+    raise SystemExit(f"Missing required training config values: {', '.join(missing)}")
+
+print(cfg.launcher.gpu_id)
+print(str(cfg.launcher.overwrite).lower())
+print(str(cfg.training.resume).lower())
+print(cfg.algorithm)
+print(cfg.task.dataset.zarr_path)
+print(cfg.run_dir)
+PY
+)"
+mapfile -t CONFIG_LINES <<<"${CONFIG_VALUES}"
+
+GPU_ID="${CONFIG_LINES[0]}"
+OVERWRITE="${CONFIG_LINES[1]}"
+RESUME="${CONFIG_LINES[2]}"
+ALG_NAME="${CONFIG_LINES[3]}"
+ZARR_PATH="${CONFIG_LINES[4]}"
+RUN_DIR="${CONFIG_LINES[5]}"
+
+if [[ ! "${GPU_ID}" =~ ^[0-9]+$ ]]; then
+  echo "launcher.gpu_id must be a non-negative physical GPU index, got: ${GPU_ID}" >&2
+  exit 2
+fi
+if [[ "${OVERWRITE}" != "true" && "${OVERWRITE}" != "false" ]]; then
+  echo "launcher.overwrite must be true or false, got: ${OVERWRITE}" >&2
+  exit 2
+fi
+if [[ "${RESUME}" != "true" && "${RESUME}" != "false" ]]; then
+  echo "training.resume must be true or false, got: ${RESUME}" >&2
+  exit 2
+fi
+if [[ "${OVERWRITE}" == "true" && "${RESUME}" == "true" ]]; then
+  echo "launcher.overwrite and training.resume cannot both be true." >&2
+  exit 2
+fi
+if [[ "${ALG_NAME}" != "simple_dp3" && "${ALG_NAME}" != "dp3" ]]; then
+  echo "algorithm must be simple_dp3 or dp3, got: ${ALG_NAME}" >&2
+  exit 2
+fi
+
+if [[ "${ZARR_PATH}" = /* ]]; then
+  ZARR_PATH_ABS="$(realpath -m -- "${ZARR_PATH}")"
+else
+  # train.py changes cwd to HYDRA_BASE_DIR before constructing the dataset.
+  ZARR_PATH_ABS="$(realpath -m -- "${HYDRA_BASE_DIR}/${ZARR_PATH}")"
+fi
+if [[ ! -d "${ZARR_PATH_ABS}" ]]; then
+  echo "Configured zarr dataset does not exist: ${ZARR_PATH_ABS}" >&2
+  echo "Update task.dataset.zarr_path in ${CONFIG_PATH}" >&2
+  exit 2
+fi
 
 if [[ "${RUN_DIR}" = /* ]]; then
   RUN_DIR_ABS="$(realpath -m -- "${RUN_DIR}")"
@@ -124,17 +119,27 @@ case "${RUN_DIR_ABS}" in
 esac
 
 if [[ -e "${RUN_DIR_ABS}" ]]; then
-  if [[ "${OVERWRITE}" != "true" ]]; then
-    echo "Output directory already exists: ${RUN_DIR_ABS}" >&2
-    echo "Use a different RUN_DIR/EXP_NAME, or pass --overwrite to delete this whole directory first." >&2
-    exit 3
-  fi
   if [[ ! -d "${RUN_DIR_ABS}" ]]; then
-    echo "Cannot overwrite non-directory RUN_DIR: ${RUN_DIR_ABS}" >&2
+    echo "RUN_DIR is not a directory: ${RUN_DIR_ABS}" >&2
     exit 3
   fi
-  echo "Overwriting existing output directory: ${RUN_DIR_ABS}" >&2
-  rm -rf -- "${RUN_DIR_ABS}"
+  if [[ "${RESUME}" == "true" ]]; then
+    if [[ ! -f "${RUN_DIR_ABS}/checkpoints/latest.ckpt" ]]; then
+      echo "Cannot resume without checkpoints/latest.ckpt: ${RUN_DIR_ABS}" >&2
+      exit 3
+    fi
+    echo "Resuming existing output directory: ${RUN_DIR_ABS}" >&2
+  elif [[ "${OVERWRITE}" != "true" ]]; then
+    echo "Output directory already exists: ${RUN_DIR_ABS}" >&2
+    echo "Change run_dir/exp_name, set training.resume=true, or set launcher.overwrite=true." >&2
+    exit 3
+  else
+    echo "Overwriting existing output directory: ${RUN_DIR_ABS}" >&2
+    rm -rf -- "${RUN_DIR_ABS}"
+  fi
+elif [[ "${RESUME}" == "true" ]]; then
+  echo "Cannot resume because output directory does not exist: ${RUN_DIR_ABS}" >&2
+  exit 3
 fi
 
 cd "${REPO_ROOT}/3D-Diffusion-Policy"
@@ -142,22 +147,8 @@ cd "${REPO_ROOT}/3D-Diffusion-Policy"
 export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
-python train.py --config-name="dp3_train_config.yaml" \
-  algorithm="${ALG_NAME}" \
-  task="${TASK_CONFIG}" \
-  task.dataset.zarr_path="${ZARR_PATH}" \
-  task.dataset.max_train_episodes="${MAX_TRAIN_EPISODES}" \
-  hydra.run.dir="${RUN_DIR}" \
-  training.debug="${DEBUG}" \
-  training.seed="${SEED}" \
-  training.device="${DEVICE}" \
-  exp_name="${EXP_NAME}" \
-  logging.mode="${WANDB_MODE}" \
-  checkpoint.save_ckpt="${SAVE_CKPT}" \
-  dataloader.batch_size="${BATCH_SIZE}" \
-  val_dataloader.batch_size="${BATCH_SIZE}" \
-  dataloader.num_workers="${NUM_WORKERS}" \
-  val_dataloader.num_workers="${NUM_WORKERS}" \
-  policy.use_pc_color="${USE_PC_COLOR}" \
-  policy.pointcloud_encoder_cfg.in_channels="${PC_IN_CHANNELS}" \
-  "${EXTRA_ARGS[@]}"
+echo "Starting ${ALG_NAME} training on physical GPU ${GPU_ID}"
+echo "Dataset: ${ZARR_PATH_ABS}"
+echo "Output: ${RUN_DIR_ABS}"
+
+python train.py --config-name="dp3_train_config.yaml"

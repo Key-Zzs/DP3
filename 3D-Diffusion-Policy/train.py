@@ -90,11 +90,21 @@ class TrainDP3Workspace:
         RUN_VALIDATION = False # reduce time cost
         
         # resume training
+        resumed = False
         if cfg.training.resume:
             lastest_ckpt_path = self.get_checkpoint_path()
             if lastest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {lastest_ckpt_path}")
                 self.load_checkpoint(path=lastest_ckpt_path)
+                # Periodic checkpoints are written after an epoch's final batch
+                # and before the end-of-epoch counters are advanced.
+                self.global_step += 1
+                self.epoch += 1
+                resumed = True
+                print(
+                    f"Resume will continue at epoch={self.epoch}, "
+                    f"global_step={self.global_step}"
+                )
 
         # configure dataset
         dataset: BaseDataset
@@ -131,6 +141,8 @@ class TrainDP3Workspace:
             ema = hydra.utils.instantiate(
                 cfg.ema,
                 model=self.ema_model)
+            if resumed:
+                ema.optimization_step = self.global_step
 
         # configure env
         env_runner: BaseRunner
@@ -177,7 +189,8 @@ class TrainDP3Workspace:
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        for local_epoch_idx in range(cfg.training.num_epochs):
+        remaining_epochs = max(0, int(cfg.training.num_epochs) - int(self.epoch))
+        for local_epoch_idx in range(remaining_epochs):
             step_log = dict()
             # ========= train for this epoch ==========
             train_losses = list()
@@ -303,7 +316,10 @@ class TrainDP3Workspace:
                 step_log['test_mean_score'] = - train_loss
                 
             # checkpoint
-            if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
+            is_final_epoch = self.epoch == (int(cfg.training.num_epochs) - 1)
+            if (
+                (self.epoch % cfg.training.checkpoint_every) == 0 or is_final_epoch
+            ) and cfg.checkpoint.save_ckpt:
                 # checkpointing
                 # sanitize metric names once so all checkpoint filename formats can reuse them
                 metric_dict = dict()
