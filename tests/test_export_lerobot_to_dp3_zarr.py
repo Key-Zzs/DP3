@@ -150,6 +150,9 @@ def test_write_dp3_zarr_xyz_and_overwrite(tmp_path) -> None:
     )
     root = zarr.open(str(output), mode="r")
     assert root["data"]["point_cloud"].shape == (2, 8, 3)
+    assert root.attrs["export_status"] == "complete"
+    assert root.attrs["converted_frames"] == 2
+    assert exporter.verify_dp3_zarr(output)["state"] == root.attrs["integrity"]["state"]
     with pytest.raises(FileExistsError):
         exporter.write_dp3_zarr(
             output,
@@ -187,3 +190,32 @@ def test_write_dp3_zarr_xyzrgb(tmp_path) -> None:
     root = zarr.open(str(output), mode="r")
     assert root["data"]["point_cloud"].shape == (3, 4, 6)
     assert root["meta"]["episode_ends"][:].tolist() == [1, 3]
+    assert exporter.verify_dp3_zarr(output) == root.attrs["integrity"]
+
+
+def test_verify_rejects_incomplete_export(tmp_path) -> None:
+    zarr = pytest.importorskip("zarr")
+    output = tmp_path / "incomplete.zarr"
+    root = zarr.group(str(output))
+    root.attrs["export_status"] = "in_progress"
+
+    with pytest.raises(ValueError, match="export is not complete"):
+        exporter.verify_dp3_zarr(output)
+
+
+def test_verify_rejects_modified_array(tmp_path) -> None:
+    zarr = pytest.importorskip("zarr")
+    output = tmp_path / "modified.zarr"
+    exporter.write_dp3_zarr(
+        output,
+        state=np.zeros((2, 28), dtype=np.float32),
+        action=np.zeros((2, 14), dtype=np.float32),
+        point_cloud=np.zeros((2, 4, 3), dtype=np.float32),
+        episode_ends=np.asarray([2], dtype=np.int64),
+        attrs={},
+    )
+    root = zarr.open(str(output), mode="a")
+    root["data"]["action"][1, 0] = 1.0
+
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        exporter.verify_dp3_zarr(output)

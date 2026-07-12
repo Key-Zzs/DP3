@@ -87,6 +87,12 @@ If `--builder-config` is omitted, the script writes a generated
 depth intrinsics, color intrinsics, depth scale, and for `xyzrgb` the
 `depth_to_color` transform.
 
+Exports are committed atomically. Frames are first written to a hidden sibling
+directory, then `state`, `action`, and `point_cloud` checksums are verified. The
+final `.zarr` path appears only after `export_status=complete` and matching
+`expected_total_frames` / `converted_frames` metadata have been written. An
+interrupted export therefore cannot be mistaken for a complete training set.
+
 ## Inspect zarr
 
 ```bash
@@ -94,9 +100,11 @@ python tools/inspect_dp3_zarr.py \
   --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
 ```
 
-The inspector checks `data/state`, `data/action`, `data/point_cloud`, and
+The inspector verifies the completion metadata and stored SHA-256 checksums,
+checks `data/state`, `data/action`, `data/point_cloud`, and
 `meta/episode_ends`, prints shapes and ranges, rejects NaN/Inf, checks that
-`episode_ends[-1] == T`, and prints zarr attributes.
+`episode_ends[-1] == T`, and prints zarr attributes. Flexiv training performs
+the same completion and checksum checks before loading samples.
 
 ## Visualize zarr Point Clouds
 
@@ -201,95 +209,88 @@ meta/episode_ends cumulative int64 episode ends
 In the current DP3 dataset code, `data/state` is loaded as
 `obs["agent_pos"]`, and `data/point_cloud` is loaded as `obs["point_cloud"]`.
 
-For `simple_dp3` training, add a task YAML whose `shape_meta` matches the
-exported zarr. For the current Flexiv dual-arm dataset, `agent_pos` should be
-`[28]`, action should be `[14]`, and point cloud should be `[1024, 3]` or
-`[1024, 6]` depending on the export mode.
-
-For `xyzrgb` training, also set the policy to use point-cloud color and make
-the point-cloud encoder input channels match:
-
-```yaml
-policy:
-  use_pc_color: true
-  pointcloud_encoder_cfg:
-    in_channels: 6
-```
+The repository already provides real-task YAMLs for XYZ and XYZRGB. The unified
+training config derives point-cloud color usage and encoder input channels from
+the selected task's `expected_pointcloud_dim`.
 
 ## Train Flexiv Dual-Arm DP3
 
-The wrapper trains from an exported DP3 zarr and lets you choose the physical
-GPU explicitly as the fourth positional argument. The script sets
-`CUDA_VISIBLE_DEVICES=<gpu_id>`, so training uses `cuda:0` inside the selected
-visible device.
+All Flexiv training parameters now live in
+`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`.
+At minimum, review these fields before starting:
 
-XYZ point cloud:
+```yaml
+defaults:
+  - task: real/flexiv_dual_arm_head_xyz  # or ..._xyzrgb
+
+launcher:
+  gpu_id: 0
+  overwrite: false
+
+algorithm: simple_dp3  # simple_dp3 or dp3
+task:
+  dataset:
+    zarr_path: /absolute/path/to/flexiv_head_xyz.zarr
+    max_train_episodes: 90
+
+training:
+  seed: 42
+  resume: false
+
+logging:
+  mode: online  # online, offline, or disabled
+```
+
+`launcher.gpu_id` selects the physical GPU through `CUDA_VISIBLE_DEVICES`; keep
+`training.device: cuda:0` so the selected device is addressed correctly inside
+the process. For XYZRGB, select `real/flexiv_dual_arm_head_xyzrgb` and update
+the zarr path. The color flag and six encoder channels are resolved
+automatically.
+
+Activate the environment, then training is a zero-argument command:
 
 ```bash
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyz \
-  /path/to/flexiv_head_xyz.zarr \
-  simple_dp3 \
-  0 \
-  42
+conda activate dp3
+bash scripts/train_flexiv_dual_arm_dp3.sh
 ```
 
-XYZRGB point cloud:
-
-```bash
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyzrgb \
-  /path/to/flexiv_head_xyzrgb.zarr \
-  simple_dp3 \
-  0 \
-  42
-```
-
-Arguments are:
-
-```text
-<xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...] [--overwrite]
-```
-
-By default, checkpoints are written to this repository-relative path:
+The output directory is controlled by `run_dir` in the same YAML. Its default
+resolves to:
 
 ```text
 outputs/<exp_name>_seed<seed>/checkpoints/
 ```
 
-Set `RUN_DIR=/custom/output/dir` to override the whole Hydra output directory.
 If the target output directory already exists, the wrapper aborts by default to
-avoid mixing old checkpoints, Hydra configs, and WandB files with a new run. Add
-`--overwrite` only when you want to delete the entire target output directory
-before training starts.
+avoid mixing old checkpoints, Hydra configs, and WandB files. Set
+`launcher.overwrite: true` only when the entire existing run directory should
+be deleted. To continue an interrupted run, keep `overwrite: false`, set
+`training.resume: true`, and ensure `<run_dir>/checkpoints/latest.ckpt` exists.
+Resume continues at the next epoch instead of repeating the configured epoch
+count. The final epoch is always saved even when it is not aligned with
+`checkpoint_every`. The script no longer accepts positional training arguments
+or environment-based hyperparameter overrides.
 
-Useful environment overrides include `SAVE_CKPT=True|False`,
-`WANDB_MODE=offline|online|disabled`, `BATCH_SIZE`, `NUM_WORKERS`,
-`MAX_TRAIN_EPISODES`, and `EXP_NAME`.
+For a short sanity run, temporarily set the corresponding YAML values:
 
-Flexiv training now uses
-`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`.
-Set its `algorithm` to `simple_dp3` or `dp3`; the training wrapper also sets
-this field from its third positional argument. Model structure, observation and
-action horizons, and diffusion scheduler fields form the train/inference
-consistency contract. Optimizer, EMA update, dataloader, epoch, logging, and
-checkpoint settings are training-only.
-
-Short sanity run:
-
-```bash
-DEBUG=False SAVE_CKPT=False WANDB_MODE=disabled MAX_TRAIN_EPISODES=1 \
-BATCH_SIZE=1 NUM_WORKERS=0 \
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyz \
-  /path/to/flexiv_head_xyz.zarr \
-  simple_dp3 \
-  0 \
-  42 \
-  training.num_epochs=1 \
-  training.max_train_steps=1 \
-  training.use_ema=False \
-  training.sample_every=999999
+```yaml
+task:
+  dataset:
+    max_train_episodes: 1
+dataloader:
+  batch_size: 1
+  num_workers: 0
+val_dataloader:
+  batch_size: 1
+  num_workers: 0
+training:
+  num_epochs: 1
+  max_train_steps: 1
+  use_ema: false
+logging:
+  mode: disabled
+checkpoint:
+  save_ckpt: false
 ```
 
 ## Flexiv Dual-Arm DP3 Inference
@@ -297,13 +298,24 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
 Inference parameters live in
 `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_inference_config.yaml`.
 Edit that file to select the checkpoint, robot config, GPU, optional duration limit,
-control rate, receding/chunk action mode, reverse-diffusion steps, safety limits,
-point-cloud config, and Open3D visualization.
+control rate, action scheduling, independent Flexiv startup/servo controls,
+inference-only scheduler and diffusion steps, safety limits, pre-connection
+policy warmup, point-cloud config, and Open3D visualization. The default runtime
+executes each configured action chunk at 30 Hz and enables the 200 Hz Flexiv
+Cartesian servo thread.
 
-The model architecture, horizons, scheduler, point-cloud shape, state/action
-shape, and EMA selection are duplicated in the train and inference YAMLs. The
-launcher compares those fields with the checkpoint payload before connecting;
-only inference-specific fields may differ.
+The current epsilon checkpoint is trained with DDPM but deployed with a DDIM
+scheduler reconstructed from the checkpoint beta schedule. DDIM uses 10 steps
+at roughly 39--40 ms for batch-1 inference; do not replace it with 10-step DDPM.
+Both arms and both grippers use the model outputs without task-specific
+stationary-arm or fixed-gripper overrides.
+
+The model architecture, horizon, observation history, scheduler-training
+semantics, point-cloud shape, and state/action shape are duplicated in the train
+and inference YAMLs. The launcher compares those fields with the checkpoint
+payload before connecting. Inference `n_action_steps` may differ within the
+official DP3 slice bound, and `use_ema` selects an available checkpoint weight
+set. Other inference-specific fields may differ as documented below.
 
 The live runtime is standalone in this repository. It uses the local Flexiv
 adapter and RealSense RGB-D implementation under

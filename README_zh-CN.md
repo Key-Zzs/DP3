@@ -81,6 +81,11 @@ python tools/export_lerobot_to_dp3_zarr.py \
 `*.pointcloud_builder.yaml`。该配置保存 depth intrinsics、color intrinsics、
 depth scale；在 `xyzrgb` 模式下还会保存 `depth_to_color` 变换。
 
+导出采用原子提交：各帧先写入同目录下的隐藏临时目录，随后校验
+`state`、`action`、`point_cloud` 的 SHA-256。只有写入
+`export_status=complete` 且 `expected_total_frames` 与 `converted_frames`
+一致后，最终 `.zarr` 路径才会出现。因此中断的导出不会再被误认为完整训练集。
+
 ## 检查 zarr
 
 ```bash
@@ -88,9 +93,10 @@ python tools/inspect_dp3_zarr.py \
   --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
 ```
 
-检查脚本会验证 `data/state`、`data/action`、`data/point_cloud` 和
-`meta/episode_ends`，打印 shape 和数值范围，拒绝 NaN/Inf，检查
-`episode_ends[-1] == T`，并打印 zarr attrs。
+检查脚本会验证完成标记和保存的 SHA-256，再检查 `data/state`、
+`data/action`、`data/point_cloud` 和 `meta/episode_ends`，打印 shape 和
+数值范围，拒绝 NaN/Inf，检查 `episode_ends[-1] == T`，并打印 zarr
+attrs。Flexiv 训练在读取样本前也会执行相同的完成标记和校验和检查。
 
 ## 可视化 zarr 点云
 
@@ -188,89 +194,82 @@ meta/episode_ends 累积 episode 结束位置，int64
 在当前 DP3 dataset 代码中，`data/state` 会被加载为
 `obs["agent_pos"]`，`data/point_cloud` 会被加载为 `obs["point_cloud"]`。
 
-使用 `simple_dp3` 训练时，需要新增一个 task YAML，并让其中的 `shape_meta`
-与导出的 zarr 一致。对于当前 Flexiv 双臂数据集，`agent_pos` 应为 `[28]`，
-action 应为 `[14]`，point cloud 应根据导出模式设置为 `[1024, 3]` 或
-`[1024, 6]`。
-
-如果使用 `xyzrgb` 训练，还需要让策略使用点云颜色，并匹配点云 encoder 的输入通道数：
-
-```yaml
-policy:
-  use_pc_color: true
-  pointcloud_encoder_cfg:
-    in_channels: 6
-```
+仓库已经提供 XYZ 和 XYZRGB 两个真实任务 YAML。统一训练配置会根据所选任务的
+`expected_pointcloud_dim` 自动决定是否使用颜色，并自动设置点云 encoder 输入通道数。
 
 ## 训练 Flexiv 双臂 DP3
 
-训练封装脚本会从已导出的 DP3 zarr 启动训练，并允许通过第 4 个位置参数显式选择物理 GPU。
-脚本内部会设置 `CUDA_VISIBLE_DEVICES=<gpu_id>`，因此训练进程内部仍使用
-`cuda:0` 指向被选中的那张卡。
+Flexiv 训练的所有参数现在都放在
+`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`。
+启动前至少检查这些字段：
 
-XYZ 点云：
+```yaml
+defaults:
+  - task: real/flexiv_dual_arm_head_xyz  # 或 ..._xyzrgb
+
+launcher:
+  gpu_id: 0
+  overwrite: false
+
+algorithm: simple_dp3  # simple_dp3 或 dp3
+task:
+  dataset:
+    zarr_path: /绝对路径/flexiv_head_xyz.zarr
+    max_train_episodes: 90
+
+training:
+  seed: 42
+  resume: false
+
+logging:
+  mode: online  # online、offline 或 disabled
+```
+
+`launcher.gpu_id` 通过 `CUDA_VISIBLE_DEVICES` 选择物理 GPU；请保持
+`training.device: cuda:0`，使训练进程正确使用映射后的显卡。训练 XYZRGB 时，
+把 task 改成 `real/flexiv_dual_arm_head_xyzrgb` 并更新 zarr 路径即可，颜色开关和
+6 通道 encoder 会自动解析。
+
+激活环境后，训练只需要一条零参数命令：
 
 ```bash
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyz \
-  /path/to/flexiv_head_xyz.zarr \
-  simple_dp3 \
-  0 \
-  42
+conda activate dp3
+bash scripts/train_flexiv_dual_arm_dp3.sh
 ```
 
-XYZRGB 点云：
-
-```bash
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyzrgb \
-  /path/to/flexiv_head_xyzrgb.zarr \
-  simple_dp3 \
-  0 \
-  42
-```
-
-参数格式：
-
-```text
-<xyz|xyzrgb> <zarr_path> [simple_dp3|dp3] [gpu_id] [seed] [hydra_overrides...] [--overwrite]
-```
-
-默认 checkpoint 输出到当前仓库内的相对路径：
+输出目录由同一个 YAML 中的 `run_dir` 控制，默认解析为：
 
 ```text
 outputs/<exp_name>_seed<seed>/checkpoints/
 ```
 
-如需指定整个 Hydra 输出目录，设置 `RUN_DIR=/custom/output/dir`。如果目标输出目录已经存在，
-训练封装脚本默认会报错退出，避免旧 checkpoint、Hydra 配置和 WandB 文件与新训练混在一起。
-只有显式添加 `--overwrite` 时，脚本才会先删除整个目标输出目录再开始训练。
+如果目标输出目录已经存在，脚本默认报错退出，避免混入旧 checkpoint、Hydra 配置和
+WandB 文件。只有确认要删除整个旧运行目录时，才设置 `launcher.overwrite: true`。
+如需继续中断的训练，保持 `overwrite: false`，设置 `training.resume: true`，并确认
+`<run_dir>/checkpoints/latest.ckpt` 存在。恢复训练会从下一个 epoch 继续，不会重新执行
+完整的 `num_epochs`；最后一个 epoch 即使不落在 `checkpoint_every` 周期上也会强制保存。
+脚本不再接收位置训练参数或环境变量形式的超参数覆盖。
 
-常用环境变量包括
-`SAVE_CKPT=True|False`、`WANDB_MODE=offline|online|disabled`、`BATCH_SIZE`、
-`NUM_WORKERS`、`MAX_TRAIN_EPISODES` 和 `EXP_NAME`。
+最小 sanity 训练可以临时在 YAML 中设置：
 
-Flexiv 训练统一读取
-`3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_train_config.yaml`。
-其中 `algorithm` 可选 `simple_dp3` 或 `dp3`，训练脚本也会根据第三个位置参数覆盖该字段。
-模型结构、观测/动作时域和扩散调度器属于训练推理一致参数；优化器、EMA 更新、
-dataloader、epoch、日志和 checkpoint 保存属于训练专用参数。
-
-最小 sanity 训练：
-
-```bash
-DEBUG=False SAVE_CKPT=False WANDB_MODE=disabled MAX_TRAIN_EPISODES=1 \
-BATCH_SIZE=1 NUM_WORKERS=0 \
-conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
-  xyz \
-  /path/to/flexiv_head_xyz.zarr \
-  simple_dp3 \
-  0 \
-  42 \
-  training.num_epochs=1 \
-  training.max_train_steps=1 \
-  training.use_ema=False \
-  training.sample_every=999999
+```yaml
+task:
+  dataset:
+    max_train_episodes: 1
+dataloader:
+  batch_size: 1
+  num_workers: 0
+val_dataloader:
+  batch_size: 1
+  num_workers: 0
+training:
+  num_epochs: 1
+  max_train_steps: 1
+  use_ema: false
+logging:
+  mode: disabled
+checkpoint:
+  save_ckpt: false
 ```
 
 ## Flexiv 双臂 DP3 推理
@@ -278,11 +277,18 @@ conda run -n dp3 bash scripts/train_flexiv_dual_arm_dp3.sh \
 推理参数统一放在
 `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_inference_config.yaml`。
 在该文件中设置 checkpoint、机器人配置、GPU、可选运行时长上限、控制频率、
-receding/chunk 动作模式、反向扩散步数、动作限幅、点云配置和 Open3D 可视化。
+动作队列模式、Flexiv 启动/servo 独立开关、推理专用 scheduler 与反向扩散步数、连接
+机器人前的策略 warmup、动作限幅、点云配置和 Open3D 可视化。默认以 30 Hz 依次执行
+配置的 action chunk，并启用 200 Hz Flexiv 笛卡尔 servo thread。
 
-训练和推理 YAML 都显式包含模型结构、时域、扩散调度器、点云 shape、state/action
-shape 和 EMA 选择。推理入口会在连接机器人前，将这些参数与 checkpoint 内保存的训练
-配置逐项比较；只有推理专用参数允许不同。
+当前 epsilon checkpoint 使用 DDPM 训练，但部署时根据 checkpoint 的 beta schedule
+重建 DDIM scheduler。DDIM 10 步的 batch-1 推理约为 39--40 ms；不要替换成 DDPM
+10 步。双臂和双夹爪都使用模型输出，不做固定臂或固定夹爪的任务特定覆盖。
+
+训练和推理 YAML 都显式包含模型结构、horizon、观测历史、扩散训练语义、点云 shape
+和 state/action shape。推理入口会在连接机器人前，将这些权重契约参数与 checkpoint
+内保存的训练配置逐项比较。`n_action_steps` 可在官方 DP3 切片范围内独立设置；
+`use_ema` 用于选择 checkpoint 中实际存在的 EMA 或原始权重。
 
 实时推理运行时已经完整收回本仓库：Flexiv adapter 和 RealSense RGB-D 实现位于
 `third_party/real/dual_flexiv_rizon4s/interface`，不需要外部 Le-nero checkout，也不依赖

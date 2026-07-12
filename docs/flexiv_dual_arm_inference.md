@@ -52,18 +52,30 @@ The following fields describe the learned model contract and are present in
 both YAML files:
 
 - policy class: `SimpleDP3` or `DP3`;
-- `horizon`, `n_obs_steps`, and `n_action_steps`;
+- `horizon` and `n_obs_steps`;
 - conditioning mode and U-Net structure;
 - point-cloud encoder structure and XYZ/XYZRGB channel count;
-- DDIM scheduler type, training timesteps, beta schedule, clipping, and
-  prediction type;
+- diffusion scheduler type, training timesteps, beta schedule, and prediction
+  type;
 - point-cloud, robot-state, and action shapes;
-- EMA-versus-raw checkpoint weight selection.
 
 Before hardware connection, the launcher compares these fields with the Hydra
 configuration stored in the checkpoint. A mismatch stops startup with a list of
 the differing fields. Editing the current training YAML does not alter an
 already-created checkpoint.
+
+`n_action_steps` is not part of the learned-weight contract. DP3 trains the
+complete `horizon` trajectory and only slices the returned rollout during
+`predict_action()`. Inference may choose any positive value satisfying
+`n_action_steps <= horizon - n_obs_steps + 1`. `use_ema` is also an inference
+selection: raw weights may always be selected, while EMA requires EMA weights
+to exist in the checkpoint. The legacy `policy.use_point_crop` field is consumed
+by official simulation environment wrappers, not by the policy model; this real
+pipeline obtains cropping from the PointCloudBuilder config. `policy.crop_shape`
+and `policy.pointcloud_encoder_cfg.normal_channel` are also accepted but unused
+by the current point-cloud encoder, so they are not hard-matched either.
+Scheduler `clip_sample` is likewise an inference sampling option and is applied
+to the selected checkpoint/DDIM scheduler rather than hard-matched to training.
 
 ### Training-Only
 
@@ -84,19 +96,29 @@ does not affect the DP3 training loss.
 The inference YAML owns:
 
 - checkpoint and Flexiv robot-config paths;
+- independent Flexiv enable/fault/Home/tool/gripper/mode/servo controls;
 - physical GPU selection and policy/PointCloudBuilder devices;
 - optional duration limit and policy-loop frequency;
 - `receding` versus `chunk` action scheduling;
+- inference-only scheduler selection (`checkpoint` or `ddim`);
 - reverse-diffusion `num_inference_steps`;
+- zero-input `policy_warmup_steps` performed before robot connection;
 - action scaling, Cartesian/rotation limits, and runtime watchdogs;
 - PointCloudBuilder runtime YAML;
 - audit-log directory and stop file;
 - Open3D visualization settings.
 
-Changing `num_inference_steps` trades policy latency against diffusion sampling
-quality without changing checkpoint tensor shapes. Changing architecture,
-horizons, channels, or scheduler training semantics requires a matching
-checkpoint and normally requires retraining.
+The checkpoint keeps its DDPM/epsilon training contract. The current deployment
+constructs a DDIM scheduler from that stored beta schedule and uses 10 inference
+steps; this is an inference-only sampling choice and does not alter checkpoint
+tensors. Ten-step DDPM is not interchangeable and leaves large residual noise.
+Changing architecture, horizons, channels, or scheduler training semantics
+requires a matching checkpoint and normally requires retraining.
+
+`policy_warmup_steps` defaults to 2. These discarded zero-input forwards run
+before `robot.connect()` and never send actions. They initialize CUDA kernels so
+the first live cycle is measured at steady-state latency instead of cold-start
+latency; timing watchdog limits remain unchanged.
 
 ## Default Runtime Contract
 
@@ -104,21 +126,27 @@ The checked-in inference YAML currently selects:
 
 ```text
 policy                 SimpleDP3
-horizon                4
+horizon                 8
 n_obs_steps             2
-n_action_steps          3
+n_action_steps          4
+inference_scheduler  DDIM
 num_inference_steps    10
 point_cloud       [1024, 3]
 agent_pos             [28]
 action                [14]
-action_mode      receding
-rate_hz                 5
+action_mode         chunk
+rate_hz                30
 duration_seconds     null (until stopped)
 ```
 
-In `receding` mode the policy still returns three actions, but the runtime sends
-only index 0 and predicts again from the next live observation. In `chunk` mode
-all three queued actions are sent before the next policy prediction.
+Both arms and both grippers use the model outputs. The runtime does not apply
+task-specific stationary-arm or fixed-gripper overrides.
+
+In the default `chunk` mode the policy returns four actions. The runtime sends
+all four in order at 30 Hz, then uses the latest live observation and predicts the
+next chunk. This matches Le-nero's DiffusionPolicy queue and the official
+`MultiStepWrapper` execution semantics. `receding` remains available for
+diagnostics but resamples after every first action.
 
 ## Start Inference
 
@@ -129,10 +157,18 @@ checkpoint:
   path: outputs/flexiv_dual_arm_head_xyz-simple_dp3_seed42/checkpoints/latest.ckpt
 robot:
   config: ${oc.env:FLEXIV_DP3_ROBOT_CONFIG,third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml}
+  enable_on_connect: true
+  clear_fault_on_connect: true
+  go_home_on_connect: true
+  switch_tool_on_connect: true
+  initialize_gripper_on_connect: true
+  switch_cartesian_mode_on_connect: true
+  use_cartesian_servo_thread: true
 inference:
   gpu_id: 0
   duration_seconds: null  # Ctrl+C/stop file; use a positive number for a timed test
-  rate_hz: 5
+  rate_hz: 30
+  action_mode: chunk
 ```
 
 From the repository root, run:
@@ -157,17 +193,18 @@ is created. A positive value enables a timed upper bound for short tests.
 
 ## Live Inference Flow
 
-Each receding inference cycle performs:
+Every 30 Hz control cycle performs:
 
 1. read live Flexiv joints, end-effector poses, gripper widths, RGB, and depth;
 2. deproject the RGB-D frame once with PointCloudBuilder;
 3. crop in the configured camera-space workspace;
 4. sample the exact 1024-point policy input;
 5. build and stack the 28D robot-state observation;
-6. run `policy.predict_action()` with the configured reverse-diffusion steps;
-7. scale and clip the selected 14D action;
-8. verify frame age, point-cloud validity, and timing watchdogs;
-9. call `robot.send_action()` and append one JSONL audit row.
+6. when the configured action queue is empty, run `policy.predict_action()` and
+   enqueue the complete returned chunk;
+7. otherwise retain the new observation as part of the two-frame history;
+8. scale/clip and validate the next queued action;
+9. call `robot.send_action()` and append one JSONL audit row per action.
 
 Repeated RGB-D frames, padded point clouds, non-finite values, stale actions,
 or watchdog violations stop the loop. These are runtime safety conditions, not

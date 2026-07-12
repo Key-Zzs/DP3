@@ -6,6 +6,7 @@ from the live robot loop so they can be tested without hardware.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,87 @@ class SafetyLimits:
     low_speed_scale: float = 0.1
     min_gripper: float = 0.0
     max_gripper: float = 1.0
+
+
+def configure_policy_inference_scheduler(
+    policy: Any,
+    scheduler_name: str,
+    *,
+    clip_sample: bool | None = None,
+) -> str:
+    """Select an inference-only scheduler without changing the checkpoint contract."""
+
+    name = str(scheduler_name).strip().lower()
+    if name == "checkpoint":
+        if clip_sample is not None and bool(
+            getattr(policy.noise_scheduler.config, "clip_sample", False)
+        ) != bool(clip_sample):
+            policy.noise_scheduler = type(policy.noise_scheduler).from_config(
+                policy.noise_scheduler.config,
+                clip_sample=bool(clip_sample),
+            )
+            if hasattr(policy, "noise_scheduler_pc"):
+                policy.noise_scheduler_pc = copy.deepcopy(policy.noise_scheduler)
+        return type(policy.noise_scheduler).__name__
+    if name != "ddim":
+        raise ValueError(
+            f"Unsupported inference scheduler {scheduler_name!r}; "
+            "expected 'checkpoint' or 'ddim'"
+        )
+
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler  # noqa: PLC0415
+
+    scheduler_overrides = {}
+    if clip_sample is not None:
+        scheduler_overrides["clip_sample"] = bool(clip_sample)
+    scheduler = DDIMScheduler.from_config(
+        policy.noise_scheduler.config,
+        **scheduler_overrides,
+    )
+    policy.noise_scheduler = scheduler
+    if hasattr(policy, "noise_scheduler_pc"):
+        policy.noise_scheduler_pc = copy.deepcopy(scheduler)
+    return type(scheduler).__name__
+
+
+def configure_policy_action_steps(
+    policy: Any,
+    *,
+    horizon: Any,
+    n_obs_steps: Any,
+    n_action_steps: Any,
+) -> int:
+    """Apply the inference rollout length allowed by the DP3 action slice.
+
+    DP3 trains the complete ``horizon`` trajectory. ``n_action_steps`` is only
+    used by ``predict_action()`` to slice executable actions starting at
+    ``n_obs_steps - 1``, so it may differ from the training value within this
+    bound.
+
+    Returns the maximum legal rollout length.
+    """
+
+    resolved_horizon = _positive_int(horizon, label="horizon")
+    resolved_n_obs_steps = _positive_int(n_obs_steps, label="n_obs_steps")
+    resolved_n_action_steps = _positive_int(
+        n_action_steps,
+        label="n_action_steps",
+    )
+    max_action_steps = resolved_horizon - resolved_n_obs_steps + 1
+    if max_action_steps <= 0:
+        raise ValueError(
+            "n_obs_steps must be no greater than horizon; "
+            f"got n_obs_steps={resolved_n_obs_steps}, horizon={resolved_horizon}"
+        )
+    if resolved_n_action_steps > max_action_steps:
+        raise ValueError(
+            "n_action_steps must satisfy 1 <= n_action_steps <= "
+            "horizon - n_obs_steps + 1; "
+            f"got {resolved_n_action_steps} > {max_action_steps} "
+            f"for horizon={resolved_horizon}, n_obs_steps={resolved_n_obs_steps}"
+        )
+    policy.n_action_steps = resolved_n_action_steps
+    return max_action_steps
 
 
 def policy_contract_from_cfg(cfg: Any) -> PolicyContract:
@@ -95,7 +177,12 @@ def validate_policy_contract(contract: PolicyContract) -> None:
         )
 
 
-def load_dp3_policy_from_checkpoint(ckpt_path: str | Path, device: str | torch.device):
+def load_dp3_policy_from_checkpoint(
+    ckpt_path: str | Path,
+    device: str | torch.device,
+    *,
+    use_ema: bool | None = None,
+):
     """Load a trained DP3 workspace checkpoint and return the inference policy.
 
     The checkpoint is first mapped to CPU so a smoke test can run on machines
@@ -110,8 +197,14 @@ def load_dp3_policy_from_checkpoint(ckpt_path: str | Path, device: str | torch.d
     payload = torch.load(ckpt_path.open("rb"), pickle_module=dill, map_location="cpu")
     workspace = TrainDP3Workspace(payload["cfg"])
     workspace.load_payload(payload, exclude_keys=("optimizer",))
-    use_ema = bool(_cfg_get(workspace.cfg, "training.use_ema", default=False))
-    policy = workspace.ema_model if use_ema and workspace.ema_model is not None else workspace.model
+    if use_ema is None:
+        use_ema = bool(_cfg_get(workspace.cfg, "training.use_ema", default=False))
+    if use_ema and workspace.ema_model is None:
+        raise ValueError(
+            "use_ema=true, but this checkpoint does not contain an EMA model; "
+            "set use_ema=false or select a checkpoint trained with EMA enabled"
+        )
+    policy = workspace.ema_model if use_ema else workspace.model
     policy.to(torch.device(device))
     policy.eval()
     return policy, workspace.cfg, workspace
@@ -281,7 +374,6 @@ def filter_action_vector(
         raise ValueError("max_gripper must be in [0, 1]")
     if max_gripper < min_gripper:
         raise ValueError("max_gripper must be >= min_gripper")
-
     safe = action_vec.copy()
     safe[:12] *= low_speed_scale
     diagnostics: dict[str, Any] = {

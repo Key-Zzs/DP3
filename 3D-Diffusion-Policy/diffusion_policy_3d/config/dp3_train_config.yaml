@@ -1,17 +1,29 @@
 defaults:
-  - task: sim/adroit_hammer
+  # Change this to real/flexiv_dual_arm_head_xyzrgb for XYZRGB training.
+  - task: real/flexiv_dual_arm_head_xyz
   - _self_
+
+# Shell-launch settings read by scripts/train_flexiv_dual_arm_dp3.sh before
+# train.py starts. Keep training.device=cuda:0: CUDA_VISIBLE_DEVICES maps this
+# physical GPU to cuda:0 inside the training process.
+launcher:
+  gpu_id: 0
+  overwrite: false
 
 # Select the official DP3 or SimpleDP3 policy implementation.
 algorithm: simple_dp3 # simple_dp3 | dp3
 algorithm_profiles:
   simple_dp3:
     policy_target: diffusion_policy_3d.policy.simple_dp3.SimpleDP3
-    horizon: 4
-    n_action_steps: 3
-    down_dims: [128, 256, 384]
-    num_epochs: 600
-    lr_warmup_steps: 50
+    # Match the prior LeRobot DP temporal contract and U-Net capacity while
+    # keeping the lighter SimpleDP3 implementation for the 16 GB RTX 5080.
+    horizon: 8
+    n_action_steps: 7
+    down_dims: [512, 1024, 2048]
+    # 5199 train sequences / batch 32 = 163 steps per epoch.
+    # 245 epochs gives about 39935 optimizer steps, matching the prior DP run.
+    num_epochs: 245
+    lr_warmup_steps: 500
   dp3:
     policy_target: diffusion_policy_3d.policy.dp3.DP3
     horizon: 16
@@ -23,12 +35,22 @@ algorithm_profiles:
 name: train_${algorithm}
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: debug
+exp_name: ${task.name}-${algorithm}-10ep-v2-clean-dp-ref40k-h8
+run_dir: 3D-Diffusion-Policy/outputs/${exp_name}_seed${training.seed}
+
+# Real-data settings. Prefer an absolute zarr_path. When switching the task in
+# defaults to xyzrgb, update this path to the corresponding XYZRGB zarr.
+task:
+  dataset:
+    zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260711_v01_head_xyz_10ep_v2.zarr
+    seed: ${training.seed}
+    max_train_episodes: 10
 
 # -----------------------------------------------------------------------------
-# Train/inference consistency contract.
-# Keep the corresponding fields in dp3_inference_config.yaml identical. The
-# inference launcher validates them against the configuration stored in ckpt.
+# Checkpoint training contract.
+# Architecture/shape/diffusion-training fields must match at inference. The
+# inference rollout n_action_steps may differ within the official DP3 slice
+# bound: 1 <= n_action_steps <= horizon - n_obs_steps + 1.
 # -----------------------------------------------------------------------------
 horizon: ${algorithm_profiles.${algorithm}.horizon}
 n_obs_steps: 2
@@ -50,26 +72,25 @@ policy:
   use_up_condition: true
   diffusion_step_embed_dim: 128
   down_dims: ${algorithm_profiles.${algorithm}.down_dims}
-  crop_shape: [80, 80]
+  # This policy consumes point clouds rather than RGB feature maps.
+  crop_shape: null
   encoder_output_dim: 64
   kernel_size: 5
   n_groups: 8
 
   noise_scheduler:
-    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
     num_train_timesteps: 100
     beta_start: 0.0001
     beta_end: 0.02
     beta_schedule: squaredcos_cap_v2
     clip_sample: true
-    set_alpha_to_one: true
-    steps_offset: 0
-    prediction_type: sample
+    prediction_type: epsilon
 
-  use_pc_color: false
+  use_pc_color: ${eval:'${task.dataset.expected_pointcloud_dim} == 6'}
   pointnet_type: pointnet
   pointcloud_encoder_cfg:
-    in_channels: 3
+    in_channels: ${task.dataset.expected_pointcloud_dim}
     out_channels: ${policy.encoder_output_dim}
     use_layernorm: true
     final_norm: layernorm
@@ -92,14 +113,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128
+  batch_size: 32
   num_workers: 8
   shuffle: true
   pin_memory: true
   persistent_workers: false
 
 val_dataloader:
-  batch_size: 128
+  batch_size: 32
   num_workers: 8
   shuffle: false
   pin_memory: true
@@ -114,7 +135,7 @@ optimizer:
 
 training:
   device: cuda:0
-  seed: 42
+  seed: 1000
   debug: false
   resume: false
   lr_scheduler: cosine
@@ -123,7 +144,8 @@ training:
   gradient_accumulate_every: 1
   use_ema: true
   rollout_every: 200
-  checkpoint_every: 200
+  # 25 epochs x 163 steps/epoch = about 4075 optimizer steps per checkpoint.
+  checkpoint_every: 25
   val_every: 1
   sample_every: 5
   max_train_steps: null
@@ -131,13 +153,24 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
+  project: 3d
+
+  # 如果记录到个人默认空间，可以不写 entity。
+  # 如果记录到团队项目，填写用户名或团队 slug。
+  entity: key_z-bjtu
+
   group: ${exp_name}
-  id: null
+  name: ${exp_name}-seed${training.seed}
+
   mode: online
-  name: ${training.seed}
-  project: dp3
-  resume: true
-  tags: [dp3]
+  id: null
+  resume: never
+
+  tags:
+    - dp3
+    - flexiv
+    - ${algorithm}
+    - ${task_name}
 
 checkpoint:
   save_ckpt: true
@@ -159,7 +192,7 @@ hydra:
   job:
     override_dirname: ${name}
   run:
-    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    dir: ${run_dir}
   sweep:
     dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
     subdir: ${hydra.job.num}

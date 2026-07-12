@@ -62,6 +62,8 @@ from diffusion_policy_3d.real_world.flexiv_dual_arm_dp3 import (  # noqa: E402
     action_vector_to_flexiv_dict,
     build_agent_pos,
     build_pointcloud_frame_from_observation,
+    configure_policy_action_steps,
+    configure_policy_inference_scheduler,
     filter_action_vector,
     history_to_policy_obs,
     load_dp3_policy_from_checkpoint,
@@ -167,6 +169,8 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         num_steps=num_steps,
         rate_hz=rate_hz,
         action_mode=str(inference["action_mode"]),
+        n_action_steps=cfg["policy"]["n_action_steps"],
+        use_ema=bool(cfg["use_ema"]),
         check_config=bool(check_config),
         camera_name=str(robot.get("camera_name", "head_rgb")),
         rgb_key=None,
@@ -197,12 +201,20 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         max_send_duration_ms=float(inference["max_send_duration_ms"]),
         max_loop_overrun_ms=float(inference["max_loop_overrun_ms"]),
         i_understand_this_moves_robot=True,
-        allow_connect_motion=bool(robot.get("allow_connect_motion", False)),
+        enable_on_connect=bool(robot["enable_on_connect"]),
+        clear_fault_on_connect=bool(robot["clear_fault_on_connect"]),
+        go_home_on_connect=bool(robot["go_home_on_connect"]),
+        switch_tool_on_connect=bool(robot["switch_tool_on_connect"]),
+        initialize_gripper_on_connect=bool(robot["initialize_gripper_on_connect"]),
         switch_cartesian_mode_on_connect=bool(
-            robot.get("switch_cartesian_mode_on_connect", True)
+            robot["switch_cartesian_mode_on_connect"]
         ),
+        use_cartesian_servo_thread=bool(robot["use_cartesian_servo_thread"]),
         robot_debug=False,
+        inference_scheduler=str(inference.get("scheduler", "checkpoint")),
+        scheduler_clip_sample=bool(cfg["policy"]["noise_scheduler"]["clip_sample"]),
         num_inference_steps=int(inference["num_inference_steps"]),
+        policy_warmup_steps=int(inference.get("policy_warmup_steps", 2)),
         log_level=str(inference.get("log_level", "INFO")).upper(),
     )
 
@@ -223,16 +235,13 @@ _CONSISTENCY_FIELDS = (
     ("policy._target_", "policy._target_"),
     ("horizon", "policy.horizon"),
     ("n_obs_steps", "policy.n_obs_steps"),
-    ("n_action_steps", "policy.n_action_steps"),
     ("obs_as_global_cond", "policy.obs_as_global_cond"),
-    ("policy.use_point_crop", "policy.use_point_crop"),
     ("policy.condition_type", "policy.condition_type"),
     ("policy.use_down_condition", "policy.use_down_condition"),
     ("policy.use_mid_condition", "policy.use_mid_condition"),
     ("policy.use_up_condition", "policy.use_up_condition"),
     ("policy.diffusion_step_embed_dim", "policy.diffusion_step_embed_dim"),
     ("policy.down_dims", "policy.down_dims"),
-    ("policy.crop_shape", "policy.crop_shape"),
     ("policy.encoder_output_dim", "policy.encoder_output_dim"),
     ("policy.kernel_size", "policy.kernel_size"),
     ("policy.n_groups", "policy.n_groups"),
@@ -241,9 +250,6 @@ _CONSISTENCY_FIELDS = (
     ("policy.noise_scheduler.beta_start", "policy.noise_scheduler.beta_start"),
     ("policy.noise_scheduler.beta_end", "policy.noise_scheduler.beta_end"),
     ("policy.noise_scheduler.beta_schedule", "policy.noise_scheduler.beta_schedule"),
-    ("policy.noise_scheduler.clip_sample", "policy.noise_scheduler.clip_sample"),
-    ("policy.noise_scheduler.set_alpha_to_one", "policy.noise_scheduler.set_alpha_to_one"),
-    ("policy.noise_scheduler.steps_offset", "policy.noise_scheduler.steps_offset"),
     ("policy.noise_scheduler.prediction_type", "policy.noise_scheduler.prediction_type"),
     ("policy.use_pc_color", "policy.use_pc_color"),
     ("policy.pointnet_type", "policy.pointnet_type"),
@@ -251,11 +257,9 @@ _CONSISTENCY_FIELDS = (
     ("policy.pointcloud_encoder_cfg.out_channels", "policy.pointcloud_encoder_cfg.out_channels"),
     ("policy.pointcloud_encoder_cfg.use_layernorm", "policy.pointcloud_encoder_cfg.use_layernorm"),
     ("policy.pointcloud_encoder_cfg.final_norm", "policy.pointcloud_encoder_cfg.final_norm"),
-    ("policy.pointcloud_encoder_cfg.normal_channel", "policy.pointcloud_encoder_cfg.normal_channel"),
     ("shape_meta.obs.point_cloud.shape", "shape_meta.obs.point_cloud.shape"),
     ("shape_meta.obs.agent_pos.shape", "shape_meta.obs.agent_pos.shape"),
     ("shape_meta.action.shape", "shape_meta.action.shape"),
-    ("training.use_ema", "use_ema"),
 )
 
 
@@ -302,22 +306,55 @@ def main() -> int:
     _validate_input_files(args)
 
     device = _resolve_device(args.device)
-    policy, cfg, _workspace = load_dp3_policy_from_checkpoint(args.ckpt, device)
+    try:
+        policy, cfg, _workspace = load_dp3_policy_from_checkpoint(
+            args.ckpt,
+            device,
+            use_ema=args.use_ema,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     _validate_checkpoint_inference_config(cfg, args.inference_config)
+    try:
+        max_action_steps = configure_policy_action_steps(
+            policy,
+            horizon=OmegaConf.select(cfg, "horizon"),
+            n_obs_steps=OmegaConf.select(cfg, "n_obs_steps"),
+            n_action_steps=args.n_action_steps,
+        )
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Invalid inference policy.n_action_steps: {exc}") from exc
+    scheduler_class = configure_policy_inference_scheduler(
+        policy,
+        args.inference_scheduler,
+        clip_sample=args.scheduler_clip_sample,
+    )
     if args.num_inference_steps is not None:
         policy.num_inference_steps = int(args.num_inference_steps)
     contract = policy_contract_from_cfg(cfg)
     validate_policy_contract(contract)
     LOGGER.info(
-        "Loaded checkpoint=%s n_obs_steps=%d point_cloud=(%d,%d) state_dim=%d action_dim=%d device=%s",
+        "Loaded checkpoint=%s n_obs_steps=%d n_action_steps=%d (max=%d) "
+        "point_cloud=(%d,%d) state_dim=%d action_dim=%d use_ema=%s device=%s",
         args.ckpt,
         contract.n_obs_steps,
+        policy.n_action_steps,
+        max_action_steps,
         contract.pointcloud_points,
         contract.pointcloud_dim,
         contract.state_dim,
         contract.action_dim,
+        args.use_ema,
         device,
     )
+
+    if not args.check_config:
+        _warmup_policy(
+            policy,
+            contract,
+            device,
+            steps=args.policy_warmup_steps,
+        )
 
     builder = _load_pointcloud_builder(args.pointcloud_config, args.pointcloud_device)
     _validate_builder_contract(builder, contract)
@@ -353,7 +390,9 @@ def main() -> int:
     print(
         "[inference] "
         f"duration={duration_label} rate_hz={args.rate_hz:g} "
-        f"action_mode={args.action_mode} diffusion_steps={policy.num_inference_steps}"
+        f"action_mode={args.action_mode} scheduler={scheduler_class} "
+        f"diffusion_steps={policy.num_inference_steps} "
+        f"n_action_steps={policy.n_action_steps}"
     )
     robot = _make_flexiv_robot(args, builder)
     limits = SafetyLimits(
@@ -395,6 +434,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("Inference requires the default head RGB-D observation keys")
     if args.action_mode not in {"receding", "chunk"}:
         raise SystemExit("inference.action_mode must be receding or chunk")
+    args.n_action_steps = _positive_int(
+        args.n_action_steps,
+        label="policy.n_action_steps",
+    )
     if args.gpu_id < 0:
         raise SystemExit("inference.gpu_id must be a non-negative integer")
     if args.device.startswith("cuda") and args.device != "cuda:0":
@@ -407,6 +450,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if args.log_level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
         raise SystemExit("inference.log_level must be DEBUG, INFO, WARNING, or ERROR")
+    if args.policy_warmup_steps < 0:
+        raise SystemExit("inference.policy_warmup_steps must be a non-negative integer")
     for name in (
         "max_policy_latency_ms",
         "max_camera_frame_age_ms",
@@ -436,11 +481,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--summary-jsonl and --stop-file must be different paths so the "
             "operator stop signal cannot collide with the audit log"
-        )
-    switch_cartesian_mode = bool(getattr(args, "switch_cartesian_mode_on_connect", False))
-    if args.allow_connect_motion and switch_cartesian_mode:
-        raise SystemExit(
-            "robot.allow_connect_motion and robot.switch_cartesian_mode_on_connect are mutually exclusive"
         )
     if args.robot_config is None:
         raise SystemExit("robot.config is required for Flexiv inference")
@@ -490,6 +530,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.num_inference_steps,
             label="--num-inference-steps",
         )
+    args.inference_scheduler = str(args.inference_scheduler).strip().lower()
+    if args.inference_scheduler not in {"checkpoint", "ddim"}:
+        raise SystemExit("inference.scheduler must be 'checkpoint' or 'ddim'")
     args.low_speed_scale = _bounded_float(
         args.low_speed_scale,
         label="--low-speed-scale",
@@ -543,16 +586,6 @@ def _require_input_file(path: str | Path, label: str) -> Path:
     if not expanded.is_file():
         raise SystemExit(f"{label} does not exist or is not a file: {path}")
     return expanded
-
-
-def _connect_motion_allowed(args: argparse.Namespace) -> bool:
-    return args.mode == "inference" and bool(args.allow_connect_motion)
-
-
-def _switch_cartesian_mode_allowed(args: argparse.Namespace) -> bool:
-    return args.mode == "inference" and bool(
-        getattr(args, "switch_cartesian_mode_on_connect", False)
-    )
 
 
 def _run_inference_loop(
@@ -625,7 +658,8 @@ def _run_inference_loop(
             predicted_chunk = False
             visualization_stages = None
 
-            if args.action_mode == "receding" or not action_queue:
+            needs_policy_prediction = args.action_mode == "receding" or not action_queue
+            if args.action_mode in {"receding", "chunk"}:
                 observation = robot.get_observation()
                 rgbd_reused_by_adapter = _observation_rgbd_reused(observation, args.camera_name)
                 frame = build_pointcloud_frame_from_observation(
@@ -702,72 +736,73 @@ def _run_inference_loop(
                 )
                 agent_history.append(agent_pos)
                 point_cloud_history.append(pc_np)
-                policy_obs = history_to_policy_obs(
-                    agent_history,
-                    point_cloud_history,
-                    n_obs_steps=contract.n_obs_steps,
-                    device=device,
-                )
+                if needs_policy_prediction:
+                    policy_obs = history_to_policy_obs(
+                        agent_history,
+                        point_cloud_history,
+                        n_obs_steps=contract.n_obs_steps,
+                        device=device,
+                    )
 
-                with torch.no_grad():
-                    result = policy.predict_action(policy_obs)
-                action_seq = _policy_action_sequence(result, contract)
-                predicted_at = time.monotonic()
-                if args.action_mode == "chunk":
-                    action_queue.extend(
-                        _QueuedAction(
-                            vector=action,
-                            predicted_at=predicted_at,
-                            chunk_index=idx,
-                            chunk_size=len(action_seq),
-                            camera_frame_age_ms_at_prediction=_summary_float(
-                                camera_frame_summary,
-                                "age_ms",
-                            ),
-                            camera_frame_timestamp=_summary_float(
-                                camera_frame_summary,
-                                "timestamp",
-                            ),
-                            camera_frame_wall_time=_summary_float(
-                                camera_frame_summary,
-                                "wall_time",
-                            ),
-                            camera_frame_index=_summary_int(
-                                camera_frame_summary,
-                                "global_frame_index",
-                            ),
-                            point_cloud_padded=bool(pc_meta.get("padded")),
+                    with torch.no_grad():
+                        result = policy.predict_action(policy_obs)
+                    action_seq = _policy_action_sequence(result, contract)
+                    predicted_at = time.monotonic()
+                    if args.action_mode == "chunk":
+                        action_queue.extend(
+                            _QueuedAction(
+                                vector=action,
+                                predicted_at=predicted_at,
+                                chunk_index=idx,
+                                chunk_size=len(action_seq),
+                                camera_frame_age_ms_at_prediction=_summary_float(
+                                    camera_frame_summary,
+                                    "age_ms",
+                                ),
+                                camera_frame_timestamp=_summary_float(
+                                    camera_frame_summary,
+                                    "timestamp",
+                                ),
+                                camera_frame_wall_time=_summary_float(
+                                    camera_frame_summary,
+                                    "wall_time",
+                                ),
+                                camera_frame_index=_summary_int(
+                                    camera_frame_summary,
+                                    "global_frame_index",
+                                ),
+                                point_cloud_padded=bool(pc_meta.get("padded")),
+                            )
+                            for idx, action in enumerate(action_seq)
                         )
-                        for idx, action in enumerate(action_seq)
-                    )
-                else:
-                    action_queue.clear()
-                    action_queue.append(
-                        _QueuedAction(
-                            vector=action_seq[0],
-                            predicted_at=predicted_at,
-                            chunk_index=0,
-                            chunk_size=len(action_seq),
-                            camera_frame_age_ms_at_prediction=_summary_float(
-                                camera_frame_summary,
-                                "age_ms",
-                            ),
-                            camera_frame_timestamp=_summary_float(
-                                camera_frame_summary,
-                                "timestamp",
-                            ),
-                            camera_frame_wall_time=_summary_float(
-                                camera_frame_summary,
-                                "wall_time",
-                            ),
-                            camera_frame_index=_summary_int(
-                                camera_frame_summary,
-                                "global_frame_index",
-                            ),
-                            point_cloud_padded=bool(pc_meta.get("padded")),
+                    else:
+                        action_queue.clear()
+                        action_queue.append(
+                            _QueuedAction(
+                                vector=action_seq[0],
+                                predicted_at=predicted_at,
+                                chunk_index=0,
+                                chunk_size=len(action_seq),
+                                camera_frame_age_ms_at_prediction=_summary_float(
+                                    camera_frame_summary,
+                                    "age_ms",
+                                ),
+                                camera_frame_timestamp=_summary_float(
+                                    camera_frame_summary,
+                                    "timestamp",
+                                ),
+                                camera_frame_wall_time=_summary_float(
+                                    camera_frame_summary,
+                                    "wall_time",
+                                ),
+                                camera_frame_index=_summary_int(
+                                    camera_frame_summary,
+                                    "global_frame_index",
+                                ),
+                                point_cloud_padded=bool(pc_meta.get("padded")),
+                            )
                         )
-                    )
-                predicted_chunk = True
+                    predicted_chunk = True
                 point_cloud_summary = {
                     "stage": pc_meta.get("stage"),
                     "num_raw_points": pc_meta.get("num_raw_points"),
@@ -811,6 +846,7 @@ def _run_inference_loop(
                 "step": step_idx,
                 "mode": args.mode,
                 "action_mode": args.action_mode,
+                "inference_scheduler": args.inference_scheduler,
                 "observation_source": observation_source,
                 "predicted_chunk": predicted_chunk,
                 "chunk_index": queued_action.chunk_index,
@@ -917,6 +953,50 @@ def _run_inference_loop(
         if release_error is not None:
             raise release_error
     return 0
+
+
+def _warmup_policy(
+    policy: Any,
+    contract: Any,
+    device: torch.device,
+    *,
+    steps: int,
+) -> None:
+    """Initialize policy CUDA kernels before robot connection or action send."""
+
+    if steps <= 0:
+        return
+    policy_obs = {
+        "point_cloud": torch.zeros(
+            (
+                1,
+                int(contract.n_obs_steps),
+                int(contract.pointcloud_points),
+                int(contract.pointcloud_dim),
+            ),
+            dtype=torch.float32,
+            device=device,
+        ),
+        "agent_pos": torch.zeros(
+            (1, int(contract.n_obs_steps), int(contract.state_dim)),
+            dtype=torch.float32,
+            device=device,
+        ),
+    }
+    latencies_ms: list[float] = []
+    for _ in range(steps):
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        started = time.monotonic()
+        with torch.no_grad():
+            policy.predict_action(policy_obs)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        latencies_ms.append((time.monotonic() - started) * 1000.0)
+    print(
+        "[inference] policy warmup before robot connect: "
+        + ", ".join(f"{latency:.1f} ms" for latency in latencies_ms)
+    )
 
 
 def _start_live_visualization(
@@ -1848,23 +1928,16 @@ def _load_flexiv_config(FlexivDualArmConfig: Any, args: argparse.Namespace):
         set_if_supported("max_cartesian_delta", float(args.max_cartesian_delta))
     if getattr(args, "max_rotation_delta", None) is not None:
         set_if_supported("max_rotation_delta", float(args.max_rotation_delta))
-    connect_motion_allowed = _connect_motion_allowed(args)
-    if not connect_motion_allowed:
-        set_if_supported("enable_on_connect", False)
-        set_if_supported("clear_fault_on_connect", False)
-        set_if_supported("go_home_on_connect", False)
-        set_if_supported("reset_go_home", False)
-        set_if_supported("switch_tool_on_connect", False)
-        set_if_supported("initialize_gripper_on_connect", False)
-        set_if_supported("open_grippers_on_connect", False)
-        set_if_supported("reset_opens_grippers", False)
-        set_if_supported("zero_ft_sensor_on_connect", False)
-        set_if_supported("switch_cartesian_mode_on_connect", False)
-        set_if_supported("use_cartesian_servo_thread", False)
-        set_if_supported("camera_hardware_reset_on_connect", False)
-        set_if_supported("camera_hardware_reset_on_release", False)
-    if _switch_cartesian_mode_allowed(args):
-        set_if_supported("switch_cartesian_mode_on_connect", True)
+    for key in (
+        "enable_on_connect",
+        "clear_fault_on_connect",
+        "go_home_on_connect",
+        "switch_tool_on_connect",
+        "initialize_gripper_on_connect",
+        "switch_cartesian_mode_on_connect",
+        "use_cartesian_servo_thread",
+    ):
+        set_if_supported(key, bool(getattr(args, key)))
     set_if_supported("read_gripper_state_in_debug", bool(args.read_gripper_state and robot_debug))
 
     head_serial = args.head_camera_serial or camera_raw.get("head_cam_serial")
@@ -1994,6 +2067,15 @@ def _config_check_summary(
         "robot": _robot_config_summary(args, robot_config, include_cameras=True),
     }
     if args.mode == "inference":
+        summary["rate_hz"] = float(args.rate_hz)
+        summary["duration_seconds"] = args.duration_seconds
+        summary["action_mode"] = args.action_mode
+        summary["n_action_steps"] = int(args.n_action_steps)
+        summary["use_ema"] = bool(args.use_ema)
+        summary["inference_scheduler"] = args.inference_scheduler
+        summary["scheduler_clip_sample"] = bool(args.scheduler_clip_sample)
+        summary["num_inference_steps"] = int(args.num_inference_steps)
+        summary["policy_warmup_steps"] = int(args.policy_warmup_steps)
         summary["inference_watchdogs"] = {
             "max_policy_latency_ms": _optional_config_check_float(args.max_policy_latency_ms),
             "max_camera_frame_age_ms": _optional_config_check_float(args.max_camera_frame_age_ms),
