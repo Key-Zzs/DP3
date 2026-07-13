@@ -11,7 +11,8 @@ The original upstream DP3 README is kept as `README_DP3.md`.
 - Use the shared `PointCloudBuilder` pipeline for RGB-D to point-cloud
   generation.
 - Default camera: `head`.
-- Depth source: native RealSense depth from `sidecar.*_depth`.
+- Depth source: native RealSense `uint16` depth, from either the raw Zarr
+  sidecar or legacy `sidecar.*_depth` Parquet columns.
 - Alignment: no `rs.align`; generated configs set
   `camera.aligned_depth_to_color: false`.
 - `xyz` mode: deprojects native depth with depth intrinsics.
@@ -20,7 +21,7 @@ The original upstream DP3 README is kept as `README_DP3.md`.
 - Output point cloud frame: selected camera/depth frame.
 - No three-view fusion.
 - No world-frame or robot-base transform.
-- No FFS or FoundationStereo.
+- No FFS, FoundationStereo, stereo rectification, or stereo-derived depth.
 - No Flexiv realtime control in the offline converter.
 
 Task 5 online inference should reuse the same `PointCloudBuilder` package and
@@ -36,6 +37,47 @@ conda activate dp3
 cd 3D-Diffusion-Policy
 export PYTHONPATH=$PWD/PointCloudBuilder:$PWD/3D-Diffusion-Policy:$PYTHONPATH
 ```
+
+## Raw Sidecar Zarr vs DP3 Zarr
+
+There are two different Zarr schemas in this workflow:
+
+1. A new LeRobot recording can preserve raw sensor data in the acquisition
+   sidecar declared by `meta/rgbd_sidecar.json` and stored at
+   `sidecars/realsense.zarr`. It contains native depth, lossless left/right IR,
+   per-camera timestamp/reused values, scalar join keys, robot timestamps, and
+   episode ends for all three cameras.
+2. This offline exporter creates a derived DP3 replay buffer containing
+   `data/state`, `data/action`, `data/point_cloud`, `meta/episode_ends`, and
+   optional `data/img`. It is not a raw-sensor archive.
+
+The exporter and source debug tool accept:
+
+```text
+--rgbd-sidecar-source auto|zarr|parquet
+```
+
+`auto` is the default. If `meta/rgbd_sidecar.json` exists, `auto` must use it
+and validate the complete Zarr v2 store. An incomplete/corrupt status,
+unsupported schema/version, calibration hash mismatch, missing array, wrong
+dtype/shape/chunk/compressor, count mismatch, malformed episode ends, or scalar
+join mismatch fails before any point cloud is generated. It never silently
+falls back to Parquet when a manifest exists. Only a dataset with no manifest
+is detected as the legacy Parquet layout. Explicit `zarr` or `parquet` rejects
+a conflicting layout.
+
+Validation compares `index`, `episode_index`, `frame_index`,
+`global_frame_index`, `robot_timestamp`, the selected camera's
+`rgbd_timestamp`, and `rgbd_reused` in bounded batches. Zarr is opened once and
+native depth is read in frame chunks; a full multi-episode sidecar is not
+loaded into memory. Raw IR remains in the LeRobot sidecar and is not copied to
+the DP3 replay buffer.
+
+The reader exposes exact left/right IR pairs and calibration references for a
+future downstream pipeline, but FoundationStereo is not implemented here. A
+future `raw IR -> rectify -> disparity -> metric depth -> PointCloudBuilder`
+stage must remain separate and must not be described as supported native-depth
+export behavior.
 
 ## Default Output Path
 
@@ -63,6 +105,7 @@ Pass `--output-zarr` only when you need to override this location.
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyz \
   --num-points 1024 \
@@ -75,6 +118,7 @@ python tools/export_lerobot_to_dp3_zarr.py \
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
   --num-points 1024 \
@@ -86,6 +130,11 @@ If `--builder-config` is omitted, the script writes a generated
 `*.pointcloud_builder.yaml` next to the output zarr. The generated config stores
 depth intrinsics, color intrinsics, depth scale, and for `xyzrgb` the
 `depth_to_color` transform.
+
+Use `--rgbd-sidecar-source zarr` when a command must require the new raw
+sidecar, or `--rgbd-sidecar-source parquet` when it must require a legacy
+dataset with no raw-sidecar manifest. Existing commands that omit the option
+remain compatible because `auto` is the default.
 
 Exports are committed atomically. Frames are first written to a hidden sibling
 directory, then `state`, `action`, and `point_cloud` checksums are verified. The
@@ -103,8 +152,9 @@ python tools/inspect_dp3_zarr.py \
 The inspector verifies the completion metadata and stored SHA-256 checksums,
 checks `data/state`, `data/action`, `data/point_cloud`, and
 `meta/episode_ends`, prints shapes and ranges, rejects NaN/Inf, checks that
-`episode_ends[-1] == T`, and prints zarr attributes. Flexiv training performs
-the same completion and checksum checks before loading samples.
+`episode_ends[-1] == T`, validates recorded source provenance when present, and
+prints zarr attributes. Flexiv training performs the same completion and
+checksum checks before loading samples.
 
 ## Visualize zarr Point Clouds
 
@@ -185,6 +235,7 @@ Debug directly from a LeRobot dataset without reading zarr attrs:
 python tools/debug_lerobot_pointcloud_stages.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --frame-index 0 \
+  --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
   --num-points 1024 \
@@ -205,6 +256,12 @@ data/point_cloud (T, N, 3) float32 for xyz
 data/point_cloud (T, N, 6) float32 for xyzrgb
 meta/episode_ends cumulative int64 episode ends
 ```
+
+Optional `data/img` keeps its existing RGB semantics. Raw `depth`, `left_ir`,
+and `right_ir` arrays are not copied into this derived DP3 Zarr. Source storage,
+manifest/calibration hashes and paths, committed counts, selected camera,
+native-depth units/scale, and the PointCloudBuilder config/source are recorded
+in root attributes.
 
 In the current DP3 dataset code, `data/state` is loaded as
 `obs["agent_pos"]`, and `data/point_cloud` is loaded as `obs["point_cloud"]`.

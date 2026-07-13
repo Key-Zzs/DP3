@@ -30,7 +30,7 @@ crop:
 
 sampling:
   enabled: true
-  mode: random
+  mode: fps
   num_points: 1024
   voxel_size: 0.01
   pad_mode: repeat

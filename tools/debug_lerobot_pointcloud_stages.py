@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
         help="Zero-based dataset/export row index to inspect.",
     )
     parser.add_argument("--camera", choices=sorted(exporter.CAMERA_SPECS), default="head")
+    parser.add_argument(
+        "--rgbd-sidecar-source",
+        choices=["auto", "zarr", "parquet"],
+        default="auto",
+        help="Select raw Zarr, legacy Parquet, or strict manifest-based auto detection.",
+    )
     parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default="xyz")
     parser.add_argument("--num-points", type=int, default=1024)
     parser.add_argument("--builder-config", help="Optional PointCloudBuilder YAML path.")
@@ -85,6 +91,7 @@ class DebugInputs(argparse.Namespace):
     lerobot_path: Path
     frame_index: int
     camera: str
+    rgbd_sidecar_source: str
     pointcloud_mode: str
     num_points: int
     builder_config: str | None
@@ -119,6 +126,7 @@ def _resolve_debug_inputs(args: argparse.Namespace, tmp_dir: Path) -> DebugInput
     resolved.lerobot_path = lerobot_path
     resolved.frame_index = int(args.frame_index)
     resolved.camera = camera
+    resolved.rgbd_sidecar_source = getattr(args, "rgbd_sidecar_source", "auto")
     resolved.pointcloud_mode = pointcloud_mode
     resolved.num_points = num_points
     resolved.builder_config = builder_config
@@ -136,9 +144,17 @@ def _build_frame_stages(
     if args.frame_index >= total_frames:
         raise IndexError(f"--frame-index {args.frame_index} is outside dataset length {total_frames}")
 
-    realsense_calibration = exporter._read_json(
-        args.lerobot_path / "meta" / "realsense_calibration.json"
+    info = exporter._read_json(args.lerobot_path / "meta" / "info.json")
+    episode_rows = exporter._read_episode_rows(args.lerobot_path)
+    source = exporter.rgbd_source.open_rgbd_sidecar_source(
+        args.lerobot_path,
+        source=args.rgbd_sidecar_source,
+        info=info,
+        parquet_row_count=total_frames,
+        total_episodes=len(episode_rows) if episode_rows else None,
     )
+    source.validate_join(data_paths, camera=args.camera)
+    realsense_calibration = source.calibration
     builder_config_path, builder_config = _resolve_builder_config_for_debug(
         args=args,
         realsense_calibration=realsense_calibration,
@@ -150,7 +166,6 @@ def _build_frame_stages(
     camera_spec = exporter.CAMERA_SPECS[args.camera]
     need_rgb = args.pointcloud_mode == "xyzrgb"
     columns = [
-        camera_spec["depth_column"],
         "global_frame_index",
         camera_spec["timestamp_column"],
         camera_spec["reused_column"],
@@ -158,8 +173,15 @@ def _build_frame_stages(
         "frame_index",
         "index",
     ]
-    row, source_path = _read_row_at_index(data_paths, columns=columns, frame_index=args.frame_index)
-    depth = exporter._as_depth(row[camera_spec["depth_column"]], camera_spec["depth_column"], source_path)
+    source_frame = source.read_frame_at(
+        data_paths,
+        camera=args.camera,
+        row_index=args.frame_index,
+        columns=columns,
+    )
+    row = source_frame.row
+    source_path = source_frame.source_path
+    depth = source_frame.depth
 
     frame: dict[str, Any] = {
         "depth": depth,
@@ -177,6 +199,9 @@ def _build_frame_stages(
     exporter._reject_nonfinite(sampled, "point_cloud", args.frame_index)
 
     row["_source_parquet"] = str(source_path)
+    row["_source_sidecar_storage"] = source.storage
+    row["_source_sidecar_path"] = source.provenance["source_sidecar_path"]
+    row["_source_manifest_path"] = source.provenance["source_sidecar_manifest_path"]
     row["_builder_config"] = builder_config
     return stages, meta, row, builder_config_path
 
@@ -350,6 +375,10 @@ def _print_summary(
         print(f"  dp3_zarr: {args.dp3_zarr}")
     print(f"  frame_index: {args.frame_index}")
     print(f"  parquet: {row['_source_parquet']}")
+    print(f"  rgbd_sidecar_storage: {row['_source_sidecar_storage']}")
+    print(f"  rgbd_sidecar_path: {row['_source_sidecar_path']}")
+    if row["_source_manifest_path"] is not None:
+        print(f"  rgbd_sidecar_manifest: {row['_source_manifest_path']}")
     print(f"  global_frame_index: {row.get('global_frame_index')}")
     print(f"  episode_index: {row.get('episode_index')}")
     print(f"  episode_frame_index: {row.get('frame_index')}")

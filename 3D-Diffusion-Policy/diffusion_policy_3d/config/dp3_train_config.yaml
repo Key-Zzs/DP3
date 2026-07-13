@@ -18,11 +18,11 @@ algorithm_profiles:
     # Match the prior LeRobot DP temporal contract and U-Net capacity while
     # keeping the lighter SimpleDP3 implementation for the 16 GB RTX 5080.
     horizon: 8
-    n_action_steps: 7
+    n_action_steps: 5
     down_dims: [512, 1024, 2048]
     # 5199 train sequences / batch 32 = 163 steps per epoch.
     # 245 epochs gives about 39935 optimizer steps, matching the prior DP run.
-    num_epochs: 245
+    num_epochs: 400
     lr_warmup_steps: 500
   dp3:
     policy_target: diffusion_policy_3d.policy.dp3.DP3
@@ -35,16 +35,16 @@ algorithm_profiles:
 name: train_${algorithm}
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: ${task.name}-${algorithm}-10ep-v2-clean-dp-ref40k-h8
+exp_name: ${task.name}-${algorithm}-10ep
 run_dir: 3D-Diffusion-Policy/outputs/${exp_name}_seed${training.seed}
 
 # Real-data settings. Prefer an absolute zarr_path. When switching the task in
 # defaults to xyzrgb, update this path to the corresponding XYZRGB zarr.
 task:
   dataset:
-    zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260711_v01_head_xyz_10ep_v2.zarr
+    zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260713_v05_head_xyz.zarr
     seed: ${training.seed}
-    max_train_episodes: 10
+    max_train_episodes: 50
 
 # -----------------------------------------------------------------------------
 # Checkpoint training contract.

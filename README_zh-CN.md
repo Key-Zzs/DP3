@@ -9,7 +9,8 @@ DP3 可读取的 zarr replay buffer。原始上游 DP3 README 保留为 `README_
 - 将本地 LeRobot 数据集路径转换为 DP3 zarr。
 - 使用统一的 `PointCloudBuilder` 管线完成 RGB-D 到点云的生成。
 - 默认相机：`head`。
-- 深度来源：`sidecar.*_depth` 中的 RealSense 原生深度。
+- 深度来源：RealSense 原生 `uint16` 深度，可来自新的 raw Zarr sidecar，
+  也可来自旧的 `sidecar.*_depth` Parquet 字段。
 - 对齐方式：不做 `rs.align`；自动生成的配置使用
   `camera.aligned_depth_to_color: false`。
 - `xyz` 模式：用 depth intrinsics 反投影原生深度。
@@ -18,7 +19,7 @@ DP3 可读取的 zarr replay buffer。原始上游 DP3 README 保留为 `README_
 - 输出点云坐标系：所选相机的 depth/camera frame。
 - 不做三视角融合。
 - 不做 world-frame 或 robot-base 坐标变换。
-- 不接入 FFS 或 FoundationStereo。
+- 不接入 FFS、FoundationStereo、双目校正或双目派生深度。
 - 离线转换脚本不接入 Flexiv 实时控制。
 
 任务 5 的在线推理应复用同一个 `PointCloudBuilder` 包和同一套 YAML schema，但不应调用离线导出脚本。
@@ -32,6 +33,42 @@ conda activate dp3
 cd 3D-Diffusion-Policy
 export PYTHONPATH=$PWD/PointCloudBuilder:$PWD/3D-Diffusion-Policy:$PYTHONPATH
 ```
+
+## Raw sidecar Zarr 与 DP3 Zarr
+
+本流程中有两种用途和 schema 都不同的 Zarr：
+
+1. 新的 LeRobot 录制数据可以用 `meta/rgbd_sidecar.json` 声明 raw acquisition
+   sidecar，并把三台相机的原生 depth、无损左右 IR、每相机 timestamp/reused、
+   标量 join key、robot timestamp 和 episode ends 保存到
+   `sidecars/realsense.zarr`。
+2. 本离线导出器生成派生的 DP3 replay buffer，只包含 `data/state`、
+   `data/action`、`data/point_cloud`、`meta/episode_ends` 和可选
+   `data/img`。它不是原始传感器归档。
+
+导出器和 source debug 工具支持：
+
+```text
+--rgbd-sidecar-source auto|zarr|parquet
+```
+
+默认值是 `auto`。只要 `meta/rgbd_sidecar.json` 存在，`auto` 就必须使用它并
+完整验证 Zarr v2 store。status 非 complete、schema/version 不支持、calibration
+hash 不一致、数组缺失、dtype/shape/chunk/compressor 错误、计数不一致、
+episode ends 非法或标量 join 错位，都会在生成任何点云前失败。manifest 存在时
+绝不静默回退到 Parquet；只有完全没有 manifest 的数据集才会自动识别为旧
+Parquet 布局。显式选择 `zarr` 或 `parquet` 时，若与实际布局冲突也会直接报错。
+
+校验会分批比较 `index`、`episode_index`、`frame_index`、
+`global_frame_index`、`robot_timestamp`、所选相机的 `rgbd_timestamp` 和
+`rgbd_reused`。Zarr 只打开一次，原生 depth 按 frame chunk 读取，不会把完整的
+多 episode sidecar 一次性载入内存。原始 IR 保留在 LeRobot sidecar 中，不会复制
+进 DP3 replay buffer。
+
+reader 可以无损返回同一帧的左右 IR 和 calibration reference，供未来独立的下游
+流程使用；但当前没有实现 FoundationStereo。未来的
+`raw IR -> rectify -> disparity -> metric depth -> PointCloudBuilder` 必须是单独阶段，
+不能将其描述成当前 native-depth 导出已经支持的功能。
 
 ## 默认输出路径
 
@@ -58,6 +95,7 @@ repo id 里的路径分隔符和不适合作为文件名的字符会被替换成
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyz \
   --num-points 1024 \
@@ -70,6 +108,7 @@ python tools/export_lerobot_to_dp3_zarr.py \
 ```bash
 python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
+  --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
   --num-points 1024 \
@@ -80,6 +119,10 @@ python tools/export_lerobot_to_dp3_zarr.py \
 如果不提供 `--builder-config`，脚本会在输出 zarr 旁边写入自动生成的
 `*.pointcloud_builder.yaml`。该配置保存 depth intrinsics、color intrinsics、
 depth scale；在 `xyzrgb` 模式下还会保存 `depth_to_color` 变换。
+
+需要强制使用新 raw sidecar 时传 `--rgbd-sidecar-source zarr`；需要强制使用没有
+raw-sidecar manifest 的旧数据集时传 `--rgbd-sidecar-source parquet`。旧命令若省略
+该参数仍保持兼容，因为默认值是 `auto`。
 
 导出采用原子提交：各帧先写入同目录下的隐藏临时目录，随后校验
 `state`、`action`、`point_cloud` 的 SHA-256。只有写入
@@ -96,7 +139,8 @@ python tools/inspect_dp3_zarr.py \
 检查脚本会验证完成标记和保存的 SHA-256，再检查 `data/state`、
 `data/action`、`data/point_cloud` 和 `meta/episode_ends`，打印 shape 和
 数值范围，拒绝 NaN/Inf，检查 `episode_ends[-1] == T`，并打印 zarr
-attrs。Flexiv 训练在读取样本前也会执行相同的完成标记和校验和检查。
+attrs；若 attrs 中保存了 source provenance，还会验证并单独显示。Flexiv 训练在
+读取样本前也会执行相同的完成标记和校验和检查。
 
 ## 可视化 zarr 点云
 
@@ -171,6 +215,7 @@ python tools/debug_zarr_pointcloud_stages.py \
 python tools/debug_lerobot_pointcloud_stages.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --frame-index 0 \
+  --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
   --num-points 1024 \
@@ -190,6 +235,11 @@ data/point_cloud (T, N, 3) float32，对应 xyz
 data/point_cloud (T, N, 6) float32，对应 xyzrgb
 meta/episode_ends 累积 episode 结束位置，int64
 ```
+
+可选 `data/img` 保持现有 RGB 语义。原始 `depth`、`left_ir`、`right_ir` 不会复制
+进这个派生 DP3 Zarr。root attrs 会记录 source storage、manifest/calibration 的
+路径和 hash、committed 计数、所选相机、原生 depth units/scale，以及
+PointCloudBuilder config 和其来源。
 
 在当前 DP3 dataset 代码中，`data/state` 会被加载为
 `obs["agent_pos"]`，`data/point_cloud` 会被加载为 `obs["point_cloud"]`。

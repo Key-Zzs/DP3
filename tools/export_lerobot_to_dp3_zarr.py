@@ -17,30 +17,14 @@ from typing import Any
 import numpy as np
 import yaml
 
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
-CAMERA_SPECS = {
-    "head": {
-        "calibration_key": "head_rgb",
-        "depth_column": "sidecar.head_depth",
-        "video_key": "observation.images.head_rgb",
-        "timestamp_column": "head_rgbd_timestamp",
-        "reused_column": "head_rgbd_reused",
-    },
-    "left_wrist": {
-        "calibration_key": "left_wrist_rgb",
-        "depth_column": "sidecar.left_wrist_depth",
-        "video_key": "observation.images.left_wrist_rgb",
-        "timestamp_column": "left_wrist_rgbd_timestamp",
-        "reused_column": "left_wrist_rgbd_reused",
-    },
-    "right_wrist": {
-        "calibration_key": "right_wrist_rgb",
-        "depth_column": "sidecar.right_wrist_depth",
-        "video_key": "observation.images.right_wrist_rgb",
-        "timestamp_column": "right_wrist_rgbd_timestamp",
-        "reused_column": "right_wrist_rgbd_reused",
-    },
-}
+import lerobot_rgbd_source as rgbd_source
+
+
+CAMERA_SPECS = rgbd_source.CAMERA_SPECS
 
 STATE_COLUMN = "observation.state"
 ACTION_COLUMN = "action"
@@ -247,7 +231,6 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
 
     info = _read_json(lerobot_path / "meta" / "info.json")
     output_zarr = _resolve_output_zarr(args, lerobot_path=lerobot_path, info=info)
-    work_zarr = _prepare_atomic_output(output_zarr, overwrite=args.overwrite)
     data_paths = _data_parquet_paths(lerobot_path)
     total_frames = _count_parquet_rows(data_paths)
     episode_rows = _read_episode_rows(lerobot_path)
@@ -258,7 +241,15 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
     )
     frames_to_export = int(episode_ends[-1])
 
-    realsense_calibration = _read_json(lerobot_path / "meta" / "realsense_calibration.json")
+    sidecar_source = rgbd_source.open_rgbd_sidecar_source(
+        lerobot_path,
+        source=getattr(args, "rgbd_sidecar_source", "auto"),
+        info=info,
+        parquet_row_count=total_frames,
+        total_episodes=len(episode_rows) if episode_rows else None,
+    )
+    sidecar_source.validate_join(data_paths, camera=args.camera)
+    realsense_calibration = sidecar_source.calibration
     builder_config_path, builder_config = _resolve_builder_config(
         args=args,
         output_zarr=output_zarr,
@@ -279,6 +270,7 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
         state_dim=STATE_DIM,
         action_dim=ACTION_DIM,
         pointcloud_dim=pointcloud_dim,
+        sidecar_source=sidecar_source,
     )
     attrs.update(
         {
@@ -286,8 +278,13 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
             EXPECTED_FRAMES_ATTR: frames_to_export,
             "source_total_frames": total_frames,
             "source_fps": info.get("fps"),
+            "raw_depth_scale_m_per_unit": sidecar_source.depth_scale_m_per_unit(args.camera),
+            "pointcloud_builder_config_source": (
+                "provided" if args.builder_config else "generated_from_calibration"
+            ),
         }
     )
+    work_zarr = _prepare_atomic_output(output_zarr, overwrite=args.overwrite)
     try:
         arrays = _create_output_arrays(
             work_zarr,
@@ -309,7 +306,6 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
         columns = [
             STATE_COLUMN,
             ACTION_COLUMN,
-            camera_spec["depth_column"],
             "global_frame_index",
             camera_spec["timestamp_column"],
             camera_spec["reused_column"],
@@ -325,20 +321,19 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
             "action": hashlib.sha256(),
             "point_cloud": hashlib.sha256(),
         }
-        for row, source_path in iter_lerobot_rows(
+        for source_frame in sidecar_source.iter_frames(
             data_paths,
+            camera=args.camera,
             columns=columns,
             max_frames=frames_to_export,
         ):
+            row = source_frame.row
+            source_path = source_frame.source_path
             state = _as_vector(row[STATE_COLUMN], STATE_DIM, STATE_COLUMN, source_path)
             action = _as_vector(row[ACTION_COLUMN], ACTION_DIM, ACTION_COLUMN, source_path)
             _reject_nonfinite(state, STATE_COLUMN, converted)
             _reject_nonfinite(action, ACTION_COLUMN, converted)
-            depth = _as_depth(
-                row[camera_spec["depth_column"]],
-                camera_spec["depth_column"],
-                source_path,
-            )
+            depth = source_frame.depth
             rgb = next(rgb_iter) if rgb_iter is not None else None
 
             frame = {
@@ -399,6 +394,7 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
         "action_shape": tuple(arrays["action"].shape),
         "reused_frames": reused_count,
         "reused_ratio": reused_count / converted,
+        "rgbd_sidecar_storage": sidecar_source.storage,
         "output_zarr": str(output_zarr),
         "builder_config_path": str(builder_config_path),
     }
@@ -742,8 +738,9 @@ def _zarr_attrs(
     state_dim: int,
     action_dim: int,
     pointcloud_dim: int,
+    sidecar_source: rgbd_source.RGBDSidecarSource,
 ) -> dict[str, Any]:
-    return {
+    attrs = {
         "source_lerobot_path": str(lerobot_path),
         "camera": args.camera,
         "pointcloud_mode": args.pointcloud_mode,
@@ -758,6 +755,8 @@ def _zarr_attrs(
         "action_dim": int(action_dim),
         "pointcloud_dim": int(pointcloud_dim),
     }
+    attrs.update(sidecar_source.provenance)
+    return attrs
 
 
 def _import_pointcloud_builder() -> Any:
@@ -980,6 +979,7 @@ def _print_summary(summary: dict[str, Any]) -> None:
     print(f"  state_shape: {summary['state_shape']}")
     print(f"  action_shape: {summary['action_shape']}")
     print(f"  reused_frames: {summary['reused_frames']} ({summary['reused_ratio']:.4%})")
+    print(f"  rgbd_sidecar_storage: {summary['rgbd_sidecar_storage']}")
     print(f"  output_zarr: {summary['output_zarr']}")
     print(f"  builder_config_path: {summary['builder_config_path']}")
 
@@ -988,6 +988,14 @@ def _print_failure_diagnostics(args: argparse.Namespace, exc: BaseException) -> 
     print(f"[export] failed: {exc}", file=sys.stderr)
     root = Path(args.lerobot_path).expanduser()
     print(f"[export] lerobot_path: {root}", file=sys.stderr)
+    print(
+        f"[export] rgbd_sidecar_source: {getattr(args, 'rgbd_sidecar_source', 'auto')}",
+        file=sys.stderr,
+    )
+    print(
+        f"[export] raw sidecar manifest: {root / rgbd_source.RAW_MANIFEST_RELATIVE_PATH}",
+        file=sys.stderr,
+    )
     data_paths = sorted((root / "data").glob("chunk-*/file-*.parquet"))
     video_key = CAMERA_SPECS.get(args.camera, CAMERA_SPECS["head"])["video_key"]
     video_paths = sorted((root / "videos" / video_key).glob("chunk-*/file-*.mp4"))
@@ -1014,6 +1022,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--camera", choices=sorted(CAMERA_SPECS), default="head")
+    parser.add_argument(
+        "--rgbd-sidecar-source",
+        choices=["auto", "zarr", "parquet"],
+        default="auto",
+        help=(
+            "RGB-D/IR source layout. auto requires and validates raw Zarr when "
+            "meta/rgbd_sidecar.json exists; otherwise it uses legacy Parquet."
+        ),
+    )
     parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default="xyz")
     parser.add_argument("--num-points", type=int, default=1024)
     parser.add_argument("--builder-config", help="Optional PointCloudBuilder YAML path")

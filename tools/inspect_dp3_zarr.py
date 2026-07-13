@@ -86,6 +86,10 @@ def inspect_dp3_zarr(
     for key, array in [("state", state), ("action", action), ("point_cloud", point_cloud)]:
         if not _array_is_finite(array):
             raise ValueError(f"data/{key} contains NaN or Inf")
+    source_provenance = _validate_source_provenance(
+        dict(root.attrs),
+        converted_frames=int(state.shape[0]),
+    )
 
     summary = {
         "path": str(path),
@@ -99,6 +103,7 @@ def inspect_dp3_zarr(
         },
         "fixed_size_point_cloud": True,
         "attrs": dict(root.attrs),
+        "source_provenance": source_provenance,
         "verified_integrity": verified_integrity,
         "expected_checks": {
             "state_dim": expected_state_dim,
@@ -132,6 +137,64 @@ def _array_is_finite(array: Any) -> bool:
     return bool(np.isfinite(array[:]).all())
 
 
+def _validate_source_provenance(
+    attrs: dict[str, Any],
+    *,
+    converted_frames: int,
+) -> dict[str, Any] | None:
+    storage = attrs.get("source_sidecar_storage")
+    if storage is None:
+        return None
+    if storage not in {"parquet", "zarr_v2"}:
+        raise ValueError(f"Unsupported source_sidecar_storage: {storage!r}")
+    if attrs.get("depth_source") != "native_depth":
+        raise ValueError(
+            f"Unsupported depth_source: {attrs.get('depth_source')!r}; expected 'native_depth'"
+        )
+    committed_frames = int(attrs.get("source_sidecar_committed_frames", -1))
+    if committed_frames < converted_frames:
+        raise ValueError(
+            f"source committed frames {committed_frames} < converted frames {converted_frames}"
+        )
+    scale = float(attrs.get("raw_depth_scale_m_per_unit", -1.0))
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"Invalid raw_depth_scale_m_per_unit: {scale}")
+    if storage == "zarr_v2":
+        required = [
+            "source_sidecar_schema_name",
+            "source_sidecar_schema_version",
+            "source_sidecar_manifest_relative_path",
+            "source_sidecar_manifest_path",
+            "source_sidecar_manifest_sha256",
+            "source_sidecar_calibration_sha256",
+        ]
+        missing = [key for key in required if not attrs.get(key)]
+        if missing:
+            raise ValueError(f"Raw Zarr source provenance is missing attrs: {missing}")
+        for key in ("source_sidecar_manifest_sha256", "source_sidecar_calibration_sha256"):
+            digest = str(attrs[key])
+            if len(digest) != 64:
+                raise ValueError(f"{key} must be a SHA-256 hex digest")
+    return {
+        key: attrs.get(key)
+        for key in (
+            "source_sidecar_storage",
+            "source_sidecar_schema_name",
+            "source_sidecar_schema_version",
+            "source_sidecar_manifest_relative_path",
+            "source_sidecar_manifest_path",
+            "source_sidecar_manifest_sha256",
+            "source_sidecar_calibration_sha256",
+            "source_sidecar_committed_frames",
+            "source_sidecar_committed_episodes",
+            "camera",
+            "depth_source",
+            "source_sidecar_depth_units",
+            "raw_depth_scale_m_per_unit",
+        )
+    }
+
+
 def _print_summary(summary: dict[str, Any]) -> None:
     print(f"zarr_path: {summary['path']}")
     for key in ["state", "action", "point_cloud"]:
@@ -153,6 +216,9 @@ def _print_summary(summary: dict[str, Any]) -> None:
     )
     print(f"fixed_size_point_cloud: {summary['fixed_size_point_cloud']}")
     print(f"verified_integrity: {summary['verified_integrity']}")
+    if summary["source_provenance"] is not None:
+        print("source_provenance:")
+        print(json.dumps(summary["source_provenance"], indent=2, ensure_ascii=False))
     expected = {key: value for key, value in summary["expected_checks"].items() if value is not None}
     if expected:
         print(f"expected_checks: {expected}")

@@ -33,6 +33,12 @@ def parse_args() -> argparse.Namespace:
         help="Override source_lerobot_path stored in zarr attrs.",
     )
     parser.add_argument("--camera", choices=sorted(lerobot_debug.exporter.CAMERA_SPECS), default=None)
+    parser.add_argument(
+        "--rgbd-sidecar-source",
+        choices=["auto", "zarr", "parquet"],
+        default=None,
+        help="Override source layout stored in DP3 attrs.",
+    )
     parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default=None)
     parser.add_argument("--num-points", type=int, default=None)
     parser.add_argument("--builder-config", help="Override PointCloudBuilder YAML path.")
@@ -71,11 +77,13 @@ def _lerobot_args_from_zarr_attrs(
     pointcloud_mode = args.pointcloud_mode or attrs.get("pointcloud_mode") or "xyz"
     num_points = int(args.num_points or attrs.get("num_points") or 1024)
     builder_config = _resolve_builder_config(args, attrs, tmp_dir)
+    rgbd_sidecar_source = args.rgbd_sidecar_source or _source_selection_from_attrs(attrs)
 
     return argparse.Namespace(
         lerobot_path=lerobot_path,
         frame_index=args.frame_index,
         camera=camera,
+        rgbd_sidecar_source=rgbd_sidecar_source,
         pointcloud_mode=pointcloud_mode,
         num_points=num_points,
         builder_config=builder_config,
@@ -85,6 +93,15 @@ def _lerobot_args_from_zarr_attrs(
         no_show=args.no_show,
         dp3_zarr=args.dp3_zarr,
     )
+
+
+def _source_selection_from_attrs(attrs: dict[str, Any]) -> str:
+    storage = attrs.get("source_sidecar_storage")
+    if storage == "zarr_v2":
+        return "zarr"
+    if storage == "parquet":
+        return "parquet"
+    return "auto"
 
 
 def _resolve_builder_config(
