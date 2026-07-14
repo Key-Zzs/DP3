@@ -17,6 +17,7 @@ import torch
 
 AXES = ("x", "y", "z", "rx", "ry", "rz")
 SIDES = ("left", "right")
+FLEXIV_NORMALIZER_SCHEMA = "flexiv_physical_v1"
 
 STATE_FIELD_NAMES = tuple(
     [f"left_joint_{idx}.pos" for idx in range(1, 8)]
@@ -175,6 +176,111 @@ def validate_policy_contract(contract: PolicyContract) -> None:
         raise ValueError(
             f"Flexiv checkpoint pointcloud_dim must be 3 or 6, got {contract.pointcloud_dim}"
         )
+
+
+def validate_flexiv_normalizer_contract(
+    policy: Any,
+    *,
+    normalizer_schema: Any,
+    clip_actions_to_execution_limits: Any,
+    action_xyz_limit: Any,
+    action_rotation_limit: Any,
+    state_joint_range_floor: Any,
+    state_ee_position_range_floor: Any,
+    state_ee_rotation_range_floor: Any,
+) -> dict[str, Any]:
+    """Reject checkpoints that retain the unsafe generic static-arm normalizer."""
+
+    if normalizer_schema != FLEXIV_NORMALIZER_SCHEMA:
+        raise ValueError(
+            "Checkpoint does not declare the safe Flexiv physical normalizer "
+            f"({FLEXIV_NORMALIZER_SCHEMA}); retrain it with the current DP3 train config"
+        )
+    if clip_actions_to_execution_limits is not True:
+        raise ValueError(
+            "Checkpoint did not train on collection-time execution-clipped actions"
+        )
+    xyz_limit = _positive_float(action_xyz_limit, label="action_xyz_limit")
+    rotation_limit = _positive_float(
+        action_rotation_limit,
+        label="action_rotation_limit",
+    )
+    joint_floor = _positive_float(
+        state_joint_range_floor,
+        label="state_joint_range_floor",
+    )
+    position_floor = _positive_float(
+        state_ee_position_range_floor,
+        label="state_ee_position_range_floor",
+    )
+    state_rotation_floor = _positive_float(
+        state_ee_rotation_range_floor,
+        label="state_ee_rotation_range_floor",
+    )
+    normalizer = getattr(policy, "normalizer", None)
+    if normalizer is None:
+        raise ValueError("Checkpoint policy is missing its normalizer")
+    try:
+        action_params = normalizer["action"].params_dict
+        state_params = normalizer["agent_pos"].params_dict
+        action_scale = action_params["scale"].detach().cpu().numpy()
+        action_offset = action_params["offset"].detach().cpu().numpy()
+        state_scale = state_params["scale"].detach().cpu().numpy()
+    except (AttributeError, KeyError) as exc:
+        raise ValueError("Checkpoint normalizer is missing Flexiv action/agent_pos parameters") from exc
+    expected_action_scale = np.asarray(
+        [
+            *([1.0 / xyz_limit] * 3),
+            *([1.0 / rotation_limit] * 3),
+            *([1.0 / xyz_limit] * 3),
+            *([1.0 / rotation_limit] * 3),
+            2.0,
+            2.0,
+        ],
+        dtype=np.float32,
+    )
+    expected_action_offset = np.asarray([*([0.0] * 12), -1.0, -1.0], dtype=np.float32)
+    if action_scale.shape != (len(ACTION_FIELD_NAMES),) or not np.allclose(
+        action_scale,
+        expected_action_scale,
+        rtol=1e-6,
+        atol=1e-6,
+    ):
+        raise ValueError(
+            "Checkpoint action normalizer does not match the configured physical limits"
+        )
+    if action_offset.shape != (len(ACTION_FIELD_NAMES),) or not np.allclose(
+        action_offset,
+        expected_action_offset,
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        raise ValueError(
+            "Checkpoint action normalizer does not use zero-centered deltas and [0,1] grippers"
+        )
+    if state_scale.shape != (len(STATE_FIELD_NAMES),) or not np.isfinite(state_scale).all():
+        raise ValueError("Checkpoint agent_pos normalizer scale is invalid")
+    maximum_state_scale = np.full(len(STATE_FIELD_NAMES), np.inf, dtype=np.float32)
+    joint_indices = [*range(0, 7), *range(14, 21)]
+    position_indices = [*range(7, 10), *range(21, 24)]
+    rotation_indices = [*range(10, 13), *range(24, 27)]
+    gripper_indices = [13, 27]
+    maximum_state_scale[joint_indices] = 2.0 / joint_floor
+    maximum_state_scale[position_indices] = 2.0 / position_floor
+    maximum_state_scale[rotation_indices] = 2.0 / state_rotation_floor
+    maximum_state_scale[gripper_indices] = 2.0
+    if np.any(state_scale > maximum_state_scale + 1e-5):
+        indices = np.flatnonzero(state_scale > maximum_state_scale + 1e-5).tolist()
+        raise ValueError(
+            "Checkpoint agent_pos normalizer violates the configured range floors "
+            f"at indices {indices}"
+        )
+    return {
+        "schema": FLEXIV_NORMALIZER_SCHEMA,
+        "action_xyz_limit": xyz_limit,
+        "action_rotation_limit": rotation_limit,
+        "max_agent_pos_scale": float(np.max(state_scale)),
+    }
 
 
 def load_dp3_policy_from_checkpoint(
@@ -509,6 +615,13 @@ def _finite_float(value: Any, *, label: str) -> float:
         raise ValueError(f"{label} must be finite") from None
     if not np.isfinite(value_f):
         raise ValueError(f"{label} must be finite")
+    return value_f
+
+
+def _positive_float(value: Any, *, label: str) -> float:
+    value_f = _finite_float(value, label=label)
+    if value_f <= 0.0:
+        raise ValueError(f"{label} must be positive")
     return value_f
 
 

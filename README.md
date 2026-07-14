@@ -298,6 +298,15 @@ logging:
   mode: online  # online, offline, or disabled
 ```
 
+The Flexiv dataset uses the `flexiv_physical_v1` normalization contract. It
+replays the collection adapter's `0.02 m` translation and `0.04 rad` rotation
+norm limits in memory (the source zarr is not modified), applies symmetric
+physical action scales to both arms, maps both grippers through `[0,1]`, and
+uses robust state quantiles with per-type range floors. Training prints a
+`[FlexivNormalizer]` audit line; do not deploy a checkpoint that lacks this
+schema. Changing any of these normalizer settings requires training a new
+checkpoint rather than resuming an older run.
+
 `launcher.gpu_id` selects the physical GPU through `CUDA_VISIBLE_DEVICES`; keep
 `training.device: cuda:0` so the selected device is addressed correctly inside
 the process. For XYZRGB, select `real/flexiv_dual_arm_head_xyzrgb` and update
@@ -358,7 +367,7 @@ Edit that file to select the checkpoint, robot config, GPU, optional duration li
 control rate, action scheduling, independent Flexiv startup/servo controls,
 inference-only scheduler and diffusion steps, safety limits, pre-connection
 policy warmup, point-cloud config, and Open3D visualization. The default runtime
-executes each configured action chunk at 30 Hz and enables the 200 Hz Flexiv
+executes each configured action chunk at 15 Hz and enables the 200 Hz Flexiv
 Cartesian servo thread.
 
 The current epsilon checkpoint is trained with DDPM but deployed with a DDIM

@@ -71,6 +71,7 @@ from diffusion_policy_3d.real_world.flexiv_dual_arm_dp3 import (  # noqa: E402
     prepare_point_cloud,
     summarize_action,
     validate_agent_pos,
+    validate_flexiv_normalizer_contract,
     validate_policy_contract,
 )
 from pointcloud_builder import PointCloudBuilder  # noqa: E402
@@ -333,9 +334,38 @@ def main() -> int:
         policy.num_inference_steps = int(args.num_inference_steps)
     contract = policy_contract_from_cfg(cfg)
     validate_policy_contract(contract)
+    try:
+        normalizer_audit = validate_flexiv_normalizer_contract(
+            policy,
+            normalizer_schema=OmegaConf.select(cfg, "task.dataset.normalizer_schema"),
+            clip_actions_to_execution_limits=OmegaConf.select(
+                cfg,
+                "task.dataset.clip_actions_to_execution_limits",
+            ),
+            action_xyz_limit=OmegaConf.select(cfg, "task.dataset.action_xyz_limit"),
+            action_rotation_limit=OmegaConf.select(
+                cfg,
+                "task.dataset.action_rotation_limit",
+            ),
+            state_joint_range_floor=OmegaConf.select(
+                cfg,
+                "task.dataset.state_joint_range_floor",
+            ),
+            state_ee_position_range_floor=OmegaConf.select(
+                cfg,
+                "task.dataset.state_ee_position_range_floor",
+            ),
+            state_ee_rotation_range_floor=OmegaConf.select(
+                cfg,
+                "task.dataset.state_ee_rotation_range_floor",
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Unsafe Flexiv checkpoint normalizer: {exc}") from exc
     LOGGER.info(
         "Loaded checkpoint=%s n_obs_steps=%d n_action_steps=%d (max=%d) "
-        "point_cloud=(%d,%d) state_dim=%d action_dim=%d use_ema=%s device=%s",
+        "point_cloud=(%d,%d) state_dim=%d action_dim=%d use_ema=%s device=%s "
+        "normalizer=%s max_agent_pos_scale=%.6g",
         args.ckpt,
         contract.n_obs_steps,
         policy.n_action_steps,
@@ -346,6 +376,8 @@ def main() -> int:
         contract.action_dim,
         args.use_ema,
         device,
+        normalizer_audit["schema"],
+        normalizer_audit["max_agent_pos_scale"],
     )
 
     if not args.check_config:

@@ -111,7 +111,7 @@ inference:
   device: cuda:0
   # Run until Ctrl+C or the stop file is created.
   duration_seconds: null
-  # Execute the configured SimpleDP3 action chunk at the 30 Hz training rate,
+  # Execute the configured SimpleDP3 action chunk at the 15 Hz deployment rate,
   # matching Le-nero's queue semantics and the official MultiStepWrapper.
   rate_hz: 15
   action_mode: chunk # receding | chunk

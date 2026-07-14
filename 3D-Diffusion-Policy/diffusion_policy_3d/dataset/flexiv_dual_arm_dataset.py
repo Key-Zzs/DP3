@@ -15,7 +15,24 @@ from diffusion_policy_3d.common.sampler import (
     get_val_mask,
 )
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
-from diffusion_policy_3d.model.common.normalizer import LinearNormalizer
+from diffusion_policy_3d.model.common.normalizer import (
+    LinearNormalizer,
+    SingleFieldLinearNormalizer,
+)
+
+
+FLEXIV_NORMALIZER_SCHEMA = "flexiv_physical_v1"
+FLEXIV_STATE_DIM = 28
+FLEXIV_ACTION_DIM = 14
+_LEFT_ACTION_XYZ = slice(0, 3)
+_LEFT_ACTION_ROTATION = slice(3, 6)
+_RIGHT_ACTION_XYZ = slice(6, 9)
+_RIGHT_ACTION_ROTATION = slice(9, 12)
+_ACTION_GRIPPERS = slice(12, 14)
+_STATE_JOINT_INDICES = np.asarray([*range(0, 7), *range(14, 21)], dtype=np.int64)
+_STATE_EE_POSITION_INDICES = np.asarray([*range(7, 10), *range(21, 24)], dtype=np.int64)
+_STATE_EE_ROTATION_INDICES = np.asarray([*range(10, 13), *range(24, 27)], dtype=np.int64)
+_STATE_GRIPPER_INDICES = np.asarray([13, 27], dtype=np.int64)
 
 
 class FlexivDualArmDataset(BaseDataset):
@@ -33,10 +50,50 @@ class FlexivDualArmDataset(BaseDataset):
         expected_action_dim=14,
         expected_pointcloud_dim=None,
         expected_num_points=1024,
+        normalizer_schema=FLEXIV_NORMALIZER_SCHEMA,
+        clip_actions_to_execution_limits=True,
+        action_xyz_limit=0.02,
+        action_rotation_limit=0.04,
+        state_joint_range_floor=0.20,
+        state_ee_position_range_floor=0.10,
+        state_ee_rotation_range_floor=0.20,
+        normalizer_quantile_low=0.005,
+        normalizer_quantile_high=0.995,
     ):
         super().__init__()
         self.task_name = task_name
         self.zarr_path = str(zarr_path)
+        if normalizer_schema != FLEXIV_NORMALIZER_SCHEMA:
+            raise ValueError(
+                f"normalizer_schema must be {FLEXIV_NORMALIZER_SCHEMA!r}, "
+                f"got {normalizer_schema!r}"
+            )
+        self.normalizer_schema = normalizer_schema
+        self.clip_actions_to_execution_limits = _require_bool(
+            clip_actions_to_execution_limits,
+            name="clip_actions_to_execution_limits",
+        )
+        self.action_xyz_limit = _positive_float(action_xyz_limit, name="action_xyz_limit")
+        self.action_rotation_limit = _positive_float(
+            action_rotation_limit,
+            name="action_rotation_limit",
+        )
+        self.state_joint_range_floor = _positive_float(
+            state_joint_range_floor,
+            name="state_joint_range_floor",
+        )
+        self.state_ee_position_range_floor = _positive_float(
+            state_ee_position_range_floor,
+            name="state_ee_position_range_floor",
+        )
+        self.state_ee_rotation_range_floor = _positive_float(
+            state_ee_rotation_range_floor,
+            name="state_ee_rotation_range_floor",
+        )
+        self.normalizer_quantile_low, self.normalizer_quantile_high = _quantile_bounds(
+            normalizer_quantile_low,
+            normalizer_quantile_high,
+        )
         self.schema = _validate_zarr_schema(
             zarr_path=zarr_path,
             expected_state_dim=expected_state_dim,
@@ -84,13 +141,44 @@ class FlexivDualArmDataset(BaseDataset):
         return val_set
 
     def get_normalizer(self, mode="limits", **kwargs):
-        data = {
-            "action": self.replay_buffer["action"],
-            "agent_pos": self.replay_buffer["state"][..., :],
-            "point_cloud": self.replay_buffer["point_cloud"],
-        }
+        if mode != "limits":
+            raise ValueError(
+                f"Flexiv physical normalizer only supports mode='limits', got {mode!r}"
+            )
+        action_raw = np.asarray(self.replay_buffer["action"], dtype=np.float32)
+        action = self._preprocess_action(action_raw)
+        agent_pos = np.asarray(self.replay_buffer["state"], dtype=np.float32)
+
         normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        normalizer["action"] = _make_action_normalizer(
+            action,
+            xyz_limit=self.action_xyz_limit,
+            rotation_limit=self.action_rotation_limit,
+        )
+        normalizer["agent_pos"] = _make_state_normalizer(
+            agent_pos,
+            joint_range_floor=self.state_joint_range_floor,
+            ee_position_range_floor=self.state_ee_position_range_floor,
+            ee_rotation_range_floor=self.state_ee_rotation_range_floor,
+            quantile_low=self.normalizer_quantile_low,
+            quantile_high=self.normalizer_quantile_high,
+        )
+        normalizer["point_cloud"] = SingleFieldLinearNormalizer.create_fit(
+            self.replay_buffer["point_cloud"],
+            last_n_dims=1,
+            mode=mode,
+            **kwargs,
+        )
+        _audit_normalizer(
+            normalizer,
+            action_raw=action_raw,
+            action_applied=action,
+            action_xyz_limit=self.action_xyz_limit,
+            action_rotation_limit=self.action_rotation_limit,
+            state_joint_range_floor=self.state_joint_range_floor,
+            state_ee_position_range_floor=self.state_ee_position_range_floor,
+            state_ee_rotation_range_floor=self.state_ee_rotation_range_floor,
+        )
         return normalizer
 
     def __len__(self) -> int:
@@ -102,15 +190,195 @@ class FlexivDualArmDataset(BaseDataset):
                 "point_cloud": sample["point_cloud"].astype(np.float32, copy=False),
                 "agent_pos": sample["state"].astype(np.float32, copy=False),
             },
-            "action": sample["action"].astype(np.float32, copy=False),
+            "action": self._preprocess_action(sample["action"]),
         }
         return data
+
+    def _preprocess_action(self, action: Any) -> np.ndarray:
+        values = np.asarray(action, dtype=np.float32)
+        if values.shape[-1] != FLEXIV_ACTION_DIM:
+            raise ValueError(
+                f"Flexiv action last dimension must be {FLEXIV_ACTION_DIM}, "
+                f"got {values.shape}"
+            )
+        out = values.copy()
+        if self.clip_actions_to_execution_limits:
+            for action_slice, limit in (
+                (_LEFT_ACTION_XYZ, self.action_xyz_limit),
+                (_RIGHT_ACTION_XYZ, self.action_xyz_limit),
+                (_LEFT_ACTION_ROTATION, self.action_rotation_limit),
+                (_RIGHT_ACTION_ROTATION, self.action_rotation_limit),
+            ):
+                out[..., action_slice] = _clip_vector_norm(out[..., action_slice], limit)
+        out[..., _ACTION_GRIPPERS] = np.clip(out[..., _ACTION_GRIPPERS], 0.0, 1.0)
+        return out
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)
         data = self._sample_to_data(sample)
         return dict_apply(data, torch.from_numpy)
 
+
+def _make_action_normalizer(
+    action: np.ndarray,
+    *,
+    xyz_limit: float,
+    rotation_limit: float,
+) -> SingleFieldLinearNormalizer:
+    scale = np.ones(FLEXIV_ACTION_DIM, dtype=np.float32)
+    offset = np.zeros(FLEXIV_ACTION_DIM, dtype=np.float32)
+    scale[[0, 1, 2, 6, 7, 8]] = 1.0 / float(xyz_limit)
+    scale[[3, 4, 5, 9, 10, 11]] = 1.0 / float(rotation_limit)
+    scale[12:14] = 2.0
+    offset[12:14] = -1.0
+    return _manual_normalizer(action, scale=scale, offset=offset)
+
+
+def _make_state_normalizer(
+    state: np.ndarray,
+    *,
+    joint_range_floor: float,
+    ee_position_range_floor: float,
+    ee_rotation_range_floor: float,
+    quantile_low: float,
+    quantile_high: float,
+) -> SingleFieldLinearNormalizer:
+    values = np.asarray(state, dtype=np.float32)
+    if values.ndim != 2 or values.shape[1] != FLEXIV_STATE_DIM:
+        raise ValueError(
+            f"Flexiv state must have shape (T, {FLEXIV_STATE_DIM}), got {values.shape}"
+        )
+    lower = np.quantile(values, quantile_low, axis=0).astype(np.float32)
+    upper = np.quantile(values, quantile_high, axis=0).astype(np.float32)
+    center = (lower + upper) * 0.5
+    effective_range = upper - lower
+    effective_range[_STATE_JOINT_INDICES] = np.maximum(
+        effective_range[_STATE_JOINT_INDICES],
+        joint_range_floor,
+    )
+    effective_range[_STATE_EE_POSITION_INDICES] = np.maximum(
+        effective_range[_STATE_EE_POSITION_INDICES],
+        ee_position_range_floor,
+    )
+    effective_range[_STATE_EE_ROTATION_INDICES] = np.maximum(
+        effective_range[_STATE_EE_ROTATION_INDICES],
+        ee_rotation_range_floor,
+    )
+    center[_STATE_GRIPPER_INDICES] = 0.5
+    effective_range[_STATE_GRIPPER_INDICES] = 1.0
+    scale = 2.0 / effective_range
+    offset = -center * scale
+    return _manual_normalizer(
+        values,
+        scale=scale.astype(np.float32),
+        offset=offset.astype(np.float32),
+    )
+
+
+def _manual_normalizer(
+    data: np.ndarray,
+    *,
+    scale: np.ndarray,
+    offset: np.ndarray,
+) -> SingleFieldLinearNormalizer:
+    values = np.asarray(data, dtype=np.float32).reshape(-1, scale.shape[0])
+    input_stats = {
+        "min": values.min(axis=0).astype(np.float32),
+        "max": values.max(axis=0).astype(np.float32),
+        "mean": values.mean(axis=0).astype(np.float32),
+        "std": values.std(axis=0).astype(np.float32),
+    }
+    return SingleFieldLinearNormalizer.create_manual(
+        scale=np.asarray(scale, dtype=np.float32),
+        offset=np.asarray(offset, dtype=np.float32),
+        input_stats_dict=input_stats,
+    )
+
+
+def _clip_vector_norm(values: np.ndarray, limit: float) -> np.ndarray:
+    norms = np.linalg.norm(values, axis=-1, keepdims=True)
+    factors = np.minimum(1.0, float(limit) / np.maximum(norms, 1e-12))
+    return values * factors
+
+
+def _audit_normalizer(
+    normalizer: LinearNormalizer,
+    *,
+    action_raw: np.ndarray,
+    action_applied: np.ndarray,
+    action_xyz_limit: float,
+    action_rotation_limit: float,
+    state_joint_range_floor: float,
+    state_ee_position_range_floor: float,
+    state_ee_rotation_range_floor: float,
+) -> None:
+    action_scale = normalizer["action"].params_dict["scale"].detach().cpu().numpy()
+    state_scale = normalizer["agent_pos"].params_dict["scale"].detach().cpu().numpy()
+    expected_action_scale = np.asarray(
+        [
+            *([1.0 / action_xyz_limit] * 3),
+            *([1.0 / action_rotation_limit] * 3),
+            *([1.0 / action_xyz_limit] * 3),
+            *([1.0 / action_rotation_limit] * 3),
+            2.0,
+            2.0,
+        ],
+        dtype=np.float32,
+    )
+    if not np.allclose(action_scale, expected_action_scale, rtol=1e-6, atol=1e-6):
+        raise RuntimeError("Flexiv action normalizer scale does not match its physical limits")
+    maximum_state_scales = np.full(FLEXIV_STATE_DIM, np.inf, dtype=np.float32)
+    maximum_state_scales[_STATE_JOINT_INDICES] = 2.0 / state_joint_range_floor
+    maximum_state_scales[_STATE_EE_POSITION_INDICES] = 2.0 / state_ee_position_range_floor
+    maximum_state_scales[_STATE_EE_ROTATION_INDICES] = 2.0 / state_ee_rotation_range_floor
+    maximum_state_scales[_STATE_GRIPPER_INDICES] = 2.0
+    if np.any(state_scale > maximum_state_scales + 1e-5):
+        indices = np.flatnonzero(state_scale > maximum_state_scales + 1e-5).tolist()
+        raise RuntimeError(f"Flexiv state normalizer exceeded range-floor scale at indices {indices}")
+    changed = np.any(~np.isclose(action_raw, action_applied, rtol=0.0, atol=1e-8), axis=1)
+    print(
+        "[FlexivNormalizer] "
+        f"schema={FLEXIV_NORMALIZER_SCHEMA} "
+        f"action_xyz_limit={action_xyz_limit:g}m "
+        f"action_rotation_limit={action_rotation_limit:g}rad "
+        f"execution_clipped_frames={int(np.count_nonzero(changed))}/{action_raw.shape[0]} "
+        f"state_range_floors=(joint={state_joint_range_floor:g}rad,"
+        f"xyz={state_ee_position_range_floor:g}m,"
+        f"rotation={state_ee_rotation_range_floor:g}rad) "
+        f"max_state_scale={float(np.max(state_scale)):.6g}"
+    )
+
+
+def _positive_float(value: Any, *, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a finite positive float")
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a finite positive float") from None
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be a finite positive float")
+    return result
+
+
+def _require_bool(value: Any, *, name: str) -> bool:
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a boolean")
+    return bool(value)
+
+
+def _quantile_bounds(low: Any, high: Any) -> tuple[float, float]:
+    try:
+        low_f = float(low)
+        high_f = float(high)
+    except (TypeError, ValueError):
+        raise ValueError("normalizer quantiles must be finite floats") from None
+    if not np.isfinite(low_f) or not np.isfinite(high_f) or not 0.0 <= low_f < high_f <= 1.0:
+        raise ValueError(
+            "normalizer quantiles must satisfy 0 <= low < high <= 1, "
+            f"got low={low!r}, high={high!r}"
+        )
+    return low_f, high_f
 
 def _validate_zarr_schema(
     zarr_path: str | Path,

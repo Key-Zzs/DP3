@@ -35,7 +35,7 @@ algorithm_profiles:
 name: train_${algorithm}
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: ${task.name}-${algorithm}-10ep
+exp_name: ${task.name}-${algorithm}-10ep-physical-norm-v1
 run_dir: 3D-Diffusion-Policy/outputs/${exp_name}_seed${training.seed}
 
 # Real-data settings. Prefer an absolute zarr_path. When switching the task in
@@ -45,6 +45,19 @@ task:
     zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260713_v05_head_xyz.zarr
     seed: ${training.seed}
     max_train_episodes: 50
+    # Reconstruct the action actually accepted by the collection adapter, then
+    # normalize both arms with one physical command contract. These limits are
+    # the collection-time vector-norm limits, not the tighter deployment guard.
+    normalizer_schema: flexiv_physical_v1
+    clip_actions_to_execution_limits: true
+    action_xyz_limit: 0.02
+    action_rotation_limit: 0.04
+    # Full-range floors keep static-arm encoder noise from defining [-1, 1].
+    state_joint_range_floor: 0.20
+    state_ee_position_range_floor: 0.10
+    state_ee_rotation_range_floor: 0.20
+    normalizer_quantile_low: 0.005
+    normalizer_quantile_high: 0.995
 
 # -----------------------------------------------------------------------------
 # Checkpoint training contract.

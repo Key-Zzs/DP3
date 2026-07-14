@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -13,6 +14,11 @@ sys.path.insert(0, str(ROOT / "3D-Diffusion-Policy"))
 from diffusion_policy_3d.real_world.flexiv_dual_arm_dp3 import (  # noqa: E402
     configure_policy_action_steps,
     configure_policy_inference_scheduler,
+    validate_flexiv_normalizer_contract,
+)
+from diffusion_policy_3d.model.common.normalizer import (  # noqa: E402
+    LinearNormalizer,
+    SingleFieldLinearNormalizer,
 )
 
 
@@ -97,3 +103,66 @@ def test_rejects_unknown_inference_scheduler() -> None:
 
     with pytest.raises(ValueError, match="Unsupported inference scheduler"):
         configure_policy_inference_scheduler(policy, "unknown")
+
+
+def _manual_field(scale: list[float], offset: list[float]) -> SingleFieldLinearNormalizer:
+    scale_array = np.asarray(scale, dtype=np.float32)
+    zeros = np.zeros_like(scale_array)
+    return SingleFieldLinearNormalizer.create_manual(
+        scale=scale_array,
+        offset=np.asarray(offset, dtype=np.float32),
+        input_stats_dict={
+            "min": zeros.copy(),
+            "max": zeros.copy(),
+            "mean": zeros.copy(),
+            "std": zeros.copy(),
+        },
+    )
+
+
+def _policy_with_normalizer(*, legacy_action: bool = False) -> SimpleNamespace:
+    normalizer = LinearNormalizer()
+    action_scale = (
+        [1.0] * 14
+        if legacy_action
+        else [*([50.0] * 3), *([25.0] * 3), *([50.0] * 3), *([25.0] * 3), 2.0, 2.0]
+    )
+    action_offset = [0.0] * 12 + ([-1.0, -1.0] if not legacy_action else [0.0, -1.0])
+    normalizer["action"] = _manual_field(action_scale, action_offset)
+    normalizer["agent_pos"] = _manual_field(
+        [10.0] * 7
+        + [20.0] * 3
+        + [10.0] * 3
+        + [2.0]
+        + [10.0] * 7
+        + [20.0] * 3
+        + [10.0] * 3
+        + [2.0],
+        [0.0] * 28,
+    )
+    return SimpleNamespace(normalizer=normalizer)
+
+
+def _validate_normalizer(policy: SimpleNamespace):
+    return validate_flexiv_normalizer_contract(
+        policy,
+        normalizer_schema="flexiv_physical_v1",
+        clip_actions_to_execution_limits=True,
+        action_xyz_limit=0.02,
+        action_rotation_limit=0.04,
+        state_joint_range_floor=0.20,
+        state_ee_position_range_floor=0.10,
+        state_ee_rotation_range_floor=0.20,
+    )
+
+
+def test_flexiv_normalizer_contract_accepts_physical_scales() -> None:
+    summary = _validate_normalizer(_policy_with_normalizer())
+
+    assert summary["schema"] == "flexiv_physical_v1"
+    assert summary["max_agent_pos_scale"] == pytest.approx(20.0)
+
+
+def test_flexiv_normalizer_contract_rejects_legacy_static_action_scale() -> None:
+    with pytest.raises(ValueError, match="action normalizer"):
+        _validate_normalizer(_policy_with_normalizer(legacy_action=True))

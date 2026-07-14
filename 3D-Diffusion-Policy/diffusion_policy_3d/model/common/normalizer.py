@@ -148,7 +148,9 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
             'input_stats': nn.ParameterDict(
                 dict_apply(input_stats_dict, to_tensor))
         })
-        return cls(params_dict)
+        normalizer = cls(params_dict)
+        normalizer.requires_grad_(False)
+        return normalizer
 
     @classmethod
     def create_identity(cls, dtype=torch.float32):

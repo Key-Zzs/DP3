@@ -29,3 +29,12 @@ dataset:
   expected_action_dim: 14
   expected_pointcloud_dim: 3
   expected_num_points: 1024
+  normalizer_schema: flexiv_physical_v1
+  clip_actions_to_execution_limits: true
+  action_xyz_limit: 0.02
+  action_rotation_limit: 0.04
+  state_joint_range_floor: 0.20
+  state_ee_position_range_floor: 0.10
+  state_ee_rotation_range_floor: 0.20
+  normalizer_quantile_low: 0.005
+  normalizer_quantile_high: 0.995

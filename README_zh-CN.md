@@ -275,6 +275,13 @@ logging:
   mode: online  # online、offline 或 disabled
 ```
 
+Flexiv Dataset 使用 `flexiv_physical_v1` 归一化契约：在内存中复现采集 adapter 的
+`0.02 m` 平移和 `0.04 rad` 旋转范数限幅（不会改写源 Zarr），为左右臂使用对称的
+物理 action 尺度，两个夹爪统一按 `[0,1]` 映射，并使用稳健 state 分位数和逐类范围
+下限。训练启动时会打印 `[FlexivNormalizer]` 审计行；不要部署缺少该 schema 的
+checkpoint。修改任一 normalizer 参数后必须创建新的训练运行，不能从旧 checkpoint
+续训。
+
 `launcher.gpu_id` 通过 `CUDA_VISIBLE_DEVICES` 选择物理 GPU；请保持
 `training.device: cuda:0`，使训练进程正确使用映射后的显卡。训练 XYZRGB 时，
 把 task 改成 `real/flexiv_dual_arm_head_xyzrgb` 并更新 zarr 路径即可，颜色开关和
@@ -328,7 +335,7 @@ checkpoint:
 `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_inference_config.yaml`。
 在该文件中设置 checkpoint、机器人配置、GPU、可选运行时长上限、控制频率、
 动作队列模式、Flexiv 启动/servo 独立开关、推理专用 scheduler 与反向扩散步数、连接
-机器人前的策略 warmup、动作限幅、点云配置和 Open3D 可视化。默认以 30 Hz 依次执行
+机器人前的策略 warmup、动作限幅、点云配置和 Open3D 可视化。默认以 15 Hz 依次执行
 配置的 action chunk，并启用 200 Hz Flexiv 笛卡尔 servo thread。
 
 当前 epsilon checkpoint 使用 DDPM 训练，但部署时根据 checkpoint 的 beta schedule
