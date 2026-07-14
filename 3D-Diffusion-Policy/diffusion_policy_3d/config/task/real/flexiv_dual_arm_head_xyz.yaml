@@ -5,7 +5,7 @@ task_name: flexiv_dual_arm_head_xyz
 shape_meta: &shape_meta
   obs:
     point_cloud:
-      shape: [1024, 3]
+      shape: [2048, 3]
       type: point_cloud
     agent_pos:
       shape: [28]
@@ -28,7 +28,7 @@ dataset:
   expected_state_dim: 28
   expected_action_dim: 14
   expected_pointcloud_dim: 3
-  expected_num_points: 1024
+  expected_num_points: 2048
   normalizer_schema: flexiv_physical_v1
   clip_actions_to_execution_limits: true
   action_xyz_limit: 0.02

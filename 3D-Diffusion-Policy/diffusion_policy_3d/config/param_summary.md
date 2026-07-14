@@ -28,7 +28,7 @@ YAML 与 checkpoint 内保存的 Hydra 训练配置逐项比较。
 | `noise_scheduler` | DDPM | DDPM | checkpoint 保存的正向扩散训练语义 |
 | `num_train_timesteps` | 100 | 100 | 训练噪声时间步总数 |
 | `prediction_type` | `epsilon` | `epsilon` | 当前配置预测扩散噪声 |
-| `shape_meta` | PC `[1024,3]`, state `[28]`, action `[14]` | 同配置决定 | 模型输入输出 shape |
+| `shape_meta` | PC `[2048,3]`, state `[28]`, action `[14]` | 同配置决定 | 模型输入输出 shape |
 
 `horizon`、网络通道、点云通道、scheduler 训练语义等字段不能只改推理 YAML。
 修改后必须使用按相同参数训练的 checkpoint。

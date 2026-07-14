@@ -49,7 +49,7 @@ crop:
 sampling:
   enabled: true
   mode: fps
-  num_points: 1024
+  num_points: 2048
   voxel_size: 0.01
   pad_mode: repeat
   deterministic: true

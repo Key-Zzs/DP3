@@ -108,7 +108,7 @@ python tools/export_lerobot_to_dp3_zarr.py \
   --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyz \
-  --num-points 1024 \
+  --num-points 2048 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
   --overwrite
 ```
@@ -121,7 +121,7 @@ python tools/export_lerobot_to_dp3_zarr.py \
   --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
-  --num-points 1024 \
+  --num-points 2048 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml \
   --overwrite
 ```
@@ -187,7 +187,7 @@ Useful options:
 ```bash
 --point-size 4
 --background 1 1 1
---max-points 1024
+--max-points 2048
 --no-show
 ```
 
@@ -238,7 +238,7 @@ python tools/debug_lerobot_pointcloud_stages.py \
   --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
-  --num-points 1024 \
+  --num-points 2048 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml
 ```
 
@@ -440,7 +440,7 @@ bash scripts/run_flexiv_dual_arm_dp3_inference.sh
 ```
 
 This is the motion-producing `inference` path. It directly runs live RGB-D
-deprojection, crop, 1024-point sampling, policy prediction, action filtering,
+deprojection, crop, 2048-point sampling, policy prediction, action filtering,
 and `robot.send_action()`; it is separate from the no-motion perception-only
 entry point above. The default
 Open3D monitor runs in a separate process at 2 Hz with capacity-one latest-frame

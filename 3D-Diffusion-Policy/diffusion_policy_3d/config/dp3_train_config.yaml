@@ -35,14 +35,14 @@ algorithm_profiles:
 name: train_${algorithm}
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: ${task.name}-${algorithm}-10ep-physical-norm-v1
+exp_name: ${task.name}-${algorithm}-10ep-pc2048-physical-norm-v1
 run_dir: 3D-Diffusion-Policy/outputs/${exp_name}_seed${training.seed}
 
 # Real-data settings. Prefer an absolute zarr_path. When switching the task in
 # defaults to xyzrgb, update this path to the corresponding XYZRGB zarr.
 task:
   dataset:
-    zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260713_v05_head_xyz.zarr
+    zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260713_v05_head_xyz_2048.zarr
     seed: ${training.seed}
     max_train_episodes: 50
     # Reconstruct the action actually accepted by the collection adapter, then

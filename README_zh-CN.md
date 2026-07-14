@@ -98,7 +98,7 @@ python tools/export_lerobot_to_dp3_zarr.py \
   --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyz \
-  --num-points 1024 \
+  --num-points 2048 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
   --overwrite
 ```
@@ -111,7 +111,7 @@ python tools/export_lerobot_to_dp3_zarr.py \
   --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
-  --num-points 1024 \
+  --num-points 2048 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml \
   --overwrite
 ```
@@ -171,7 +171,7 @@ python visualizer/visualizer/visualize_zarr_pointcloud.py \
 ```bash
 --point-size 4
 --background 1 1 1
---max-points 1024
+--max-points 2048
 --no-show
 ```
 
@@ -218,7 +218,7 @@ python tools/debug_lerobot_pointcloud_stages.py \
   --rgbd-sidecar-source auto \
   --camera head \
   --pointcloud-mode xyzrgb \
-  --num-points 1024 \
+  --num-points 2048 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml
 ```
 
@@ -398,7 +398,7 @@ bash scripts/run_flexiv_dual_arm_dp3_inference.sh
 ```
 
 这是会产生机器人运动的 `inference` 流程，会直接执行实时 RGB-D 反投影、裁剪、
-1024 点采样、策略预测、动作过滤和 `robot.send_action()`；它与上述独立的无动作
+2048 点采样、策略预测、动作过滤和 `robot.send_action()`；它与上述独立的无动作
 perception-only 检查是两个入口。默认 Open3D 显示进程以 2 Hz 运行，通过容量为 1 的 latest-frame
 队列接收数据，不会阻塞控制循环。
 

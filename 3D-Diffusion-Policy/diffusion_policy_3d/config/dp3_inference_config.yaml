@@ -23,7 +23,7 @@ algorithm_profiles:
 shape_meta:
   obs:
     point_cloud:
-      shape: [1024, 3]
+      shape: [2048, 3]
       type: point_cloud
     agent_pos:
       shape: [28]
@@ -82,7 +82,7 @@ use_ema: true
 # Inference-only parameters.
 # -----------------------------------------------------------------------------
 checkpoint:
-  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3-10ep_seed1000/checkpoints/epoch=0399-global_step=47199.ckpt
+  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3-10ep-pc2048-physical-norm-v1_seed1000/checkpoints/latest.ckpt
 
 robot:
   # Copy flexiv_runtime.example.yaml to the gitignored local path, fill the
@@ -113,7 +113,7 @@ inference:
   duration_seconds: null
   # Execute the configured SimpleDP3 action chunk at the 15 Hz deployment rate,
   # matching Le-nero's queue semantics and the official MultiStepWrapper.
-  rate_hz: 15
+  rate_hz: 10
   action_mode: chunk # receding | chunk
   # Training remains DDPM/epsilon. Deployment uses DDIM built from the stored
   # DDPM beta schedule so 10 denoising steps retain quality at about 40 ms.
