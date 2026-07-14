@@ -85,6 +85,10 @@ class FlexivDualArmConfig:
     cameras: dict[str, RealSenseCameraConfig] = field(default_factory=dict)
     camera_read_timeout_ms: int = 1000
     camera_warmup_attempts: int = 10
+    camera_warmup_frames: int = 60
+    camera_warmup_stability_window: int = 15
+    camera_min_valid_depth_ratio: float = 0.75
+    camera_max_valid_depth_ratio_range: float = 0.08
     camera_hardware_reset_on_connect: bool = False
     camera_hardware_reset_on_release: bool = False
     camera_reset_settle_sec: float = 6.0
@@ -103,6 +107,26 @@ class FlexivDualArmConfig:
     go_home_rate_hz: float | None = None
 
     def __post_init__(self) -> None:
+        for name in (
+            "camera_read_timeout_ms",
+            "camera_warmup_attempts",
+            "camera_warmup_frames",
+            "camera_warmup_stability_window",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or int(value) != value or int(value) <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+        if self.camera_warmup_stability_window > self.camera_warmup_frames:
+            raise ValueError(
+                "camera_warmup_stability_window must not exceed camera_warmup_frames"
+            )
+        for name in (
+            "camera_min_valid_depth_ratio",
+            "camera_max_valid_depth_ratio_range",
+        ):
+            value = float(getattr(self, name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1], got {value!r}")
         for name, camera in self.cameras.items():
             if not isinstance(camera, RealSenseCameraConfig):
                 raise TypeError(

@@ -20,6 +20,18 @@ AXES = ("x", "y", "z", "rx", "ry", "rz")
 GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001
 
 
+def _valid_depth_ratio(frame: Any) -> float | None:
+    """Return the finite positive-depth fraction for one RGB-D frame."""
+
+    if not isinstance(frame, dict) or frame.get("depth") is None:
+        return None
+    depth = np.asarray(frame["depth"])
+    if depth.size == 0:
+        return 0.0
+    valid = np.isfinite(depth) & (depth > 0)
+    return float(np.count_nonzero(valid) / depth.size)
+
+
 def _as_np(values: Any, length: int) -> np.ndarray:
     out = np.zeros(length, dtype=float)
     if values is None:
@@ -1675,25 +1687,73 @@ class FlexivDualArm:
         logger.warning("[CAM] timed out waiting for RealSense serial(s) after reset: %s", sorted(serials))
 
     def _warmup_camera(self, cam_name: str, cam: Any) -> None:
-        attempts = max(int(self.config.camera_warmup_attempts), 1)
+        max_failures = max(int(self.config.camera_warmup_attempts), 1)
+        warmup_frames = max(int(self.config.camera_warmup_frames), 1)
+        stability_window = min(
+            max(int(self.config.camera_warmup_stability_window), 1),
+            warmup_frames,
+        )
         timeout_ms = max(int(self.config.camera_read_timeout_ms), 200)
         last_error: Exception | None = None
-        for attempt in range(1, attempts + 1):
+        valid_depth_ratios: list[float] = []
+        successful_frames = 0
+        failures = 0
+        while successful_frames < warmup_frames:
             try:
                 frame = self._capture_camera_frame(cam)
                 with self._frame_lock:
                     self._latest_frames[cam_name] = frame
-                if attempt > 1:
-                    logger.info("[CAM] %s warmed up after %d attempts", cam_name, attempt)
-                return
+                valid_depth_ratio = _valid_depth_ratio(frame)
+                if valid_depth_ratio is not None:
+                    valid_depth_ratios.append(valid_depth_ratio)
+                successful_frames += 1
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                failures += 1
+                if failures >= max_failures:
+                    raise RuntimeError(
+                        f"Camera {cam_name} did not produce {warmup_frames} warmup frames; "
+                        f"reached {failures} read failures with timeout_ms={timeout_ms}. "
+                        "Close realsense-viewer and other camera users, then replug this "
+                        "RealSense if needed."
+                    ) from last_error
                 time.sleep(0.1)
-        raise RuntimeError(
-            f"Camera {cam_name} did not produce a frame after {attempts} warmup "
-            f"attempts with timeout_ms={timeout_ms}. Close realsense-viewer and "
-            "other camera users, then replug this RealSense if needed."
-        ) from last_error
+
+        if len(valid_depth_ratios) < stability_window:
+            raise RuntimeError(
+                f"Camera {cam_name} warmup did not provide enough depth frames for "
+                f"the {stability_window}-frame stability window"
+            )
+        recent = np.asarray(valid_depth_ratios[-stability_window:], dtype=np.float64)
+        ratio_median = float(np.median(recent))
+        ratio_min = float(np.min(recent))
+        ratio_max = float(np.max(recent))
+        ratio_range = ratio_max - ratio_min
+        logger.info(
+            "[CAM] %s warmup frames=%d depth_valid_ratio median=%.3f min=%.3f "
+            "max=%.3f range=%.3f",
+            cam_name,
+            successful_frames,
+            ratio_median,
+            ratio_min,
+            ratio_max,
+            ratio_range,
+        )
+
+        minimum_ratio = float(self.config.camera_min_valid_depth_ratio)
+        if ratio_median < minimum_ratio:
+            raise RuntimeError(
+                f"Camera {cam_name} depth valid ratio median {ratio_median:.3f} is below "
+                f"camera_min_valid_depth_ratio={minimum_ratio:.3f}; refuse live policy "
+                "startup because perception does not match the training capture quality"
+            )
+        maximum_range = float(self.config.camera_max_valid_depth_ratio_range)
+        if ratio_range > maximum_range:
+            raise RuntimeError(
+                f"Camera {cam_name} depth valid ratio range {ratio_range:.3f} exceeds "
+                f"camera_max_valid_depth_ratio_range={maximum_range:.3f}; refuse live "
+                "policy startup because depth has not stabilized"
+            )
 
     def stop_cameras(self) -> None:
         """Stop camera reader threads and release RealSense pipelines."""

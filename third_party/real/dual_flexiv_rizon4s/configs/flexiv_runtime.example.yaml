@@ -53,6 +53,12 @@ robot:
   right_mount_yaw_deg: 0.0
   camera_read_timeout_ms: 2000
   camera_warmup_attempts: 15
+  # Discard complete RGB-D frames before publishing observations. The quality
+  # gate is derived from the training capture's valid-depth ratio (~0.90).
+  camera_warmup_frames: 60
+  camera_warmup_stability_window: 15
+  camera_min_valid_depth_ratio: 0.75
+  camera_max_valid_depth_ratio_range: 0.08
   camera_hardware_reset_on_connect: false
   camera_hardware_reset_on_release: false
   camera_reset_settle_sec: 6.0

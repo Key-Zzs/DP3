@@ -360,6 +360,24 @@ cp third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.example.yaml \
 本地配置已加入 `.gitignore`，不要提交真实机器人或相机序列号。如需使用其他路径，设置
 `FLEXIV_DP3_ROBOT_CONFIG=/absolute/path/to/config.yaml`。
 
+真机动作前先运行独立的 perception-only 检查：
+
+```bash
+conda run -n dp3 bash scripts/run_flexiv_dp3_perception_only.sh
+```
+
+已激活 `dp3` 环境时：
+
+```bash
+bash scripts/run_flexiv_dp3_perception_only.sh
+```
+
+该程序只打开 `head_rgb` RealSense 和 `PointCloudBuilder`，不会导入 Flexiv RDK、连接
+左右臂或发送动作。默认丢弃 60 帧 warmup，再检查 300 帧并显示 raw/cropped/sampled
+感知视图；逐帧 JSONL 和汇总 JSON 写入 `logs/`。最近 15 帧的有效深度比例中位数低于
+`0.75`、波动范围超过 `0.08`、点云发生 padding 或深度数组不拥有独立内存时，程序以
+退出码 2 报告质量失败。无桌面环境时附加 `--no-visualize`。
+
 完整推理部署只运行一条命令：
 
 ```bash
@@ -373,8 +391,8 @@ bash scripts/run_flexiv_dual_arm_dp3_inference.sh
 ```
 
 这是会产生机器人运动的 `inference` 流程，会直接执行实时 RGB-D 反投影、裁剪、
-1024 点采样、策略预测、动作过滤和 `robot.send_action()`；不再包含独立的无动作阶段或
-模式切换流程。默认 Open3D 显示进程以 2 Hz 运行，通过容量为 1 的 latest-frame
+1024 点采样、策略预测、动作过滤和 `robot.send_action()`；它与上述独立的无动作
+perception-only 检查是两个入口。默认 Open3D 显示进程以 2 Hz 运行，通过容量为 1 的 latest-frame
 队列接收数据，不会阻塞控制循环。
 
 默认配置会持续闭环推理，直到在当前终端按 `Ctrl+C`。启动器也会打印 JSONL 日志位置

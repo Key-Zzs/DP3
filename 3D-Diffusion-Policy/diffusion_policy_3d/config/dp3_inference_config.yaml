@@ -82,7 +82,7 @@ use_ema: true
 # Inference-only parameters.
 # -----------------------------------------------------------------------------
 checkpoint:
-  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3-10ep-v2-clean-dp-ref40k-h8_seed1000/checkpoints/latest.ckpt
+  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3-10ep_seed1000/checkpoints/epoch=0399-global_step=47199.ckpt
 
 robot:
   # Copy flexiv_runtime.example.yaml to the gitignored local path, fill the
@@ -113,7 +113,7 @@ inference:
   duration_seconds: null
   # Execute the configured SimpleDP3 action chunk at the 30 Hz training rate,
   # matching Le-nero's queue semantics and the official MultiStepWrapper.
-  rate_hz: 30
+  rate_hz: 15
   action_mode: chunk # receding | chunk
   # Training remains DDPM/epsilon. Deployment uses DDIM built from the stored
   # DDPM beta schedule so 10 denoising steps retain quality at about 40 ms.
@@ -123,11 +123,11 @@ inference:
   # kernels without sending actions and prevent first-cycle cold-start trips.
   policy_warmup_steps: 2
   log_dir: logs
-  log_level: WARNING
+  log_level: INFO
   stop_file: /tmp/stop_flexiv_dp3_inference
 
   # Post-policy action scaling and clipping.
-  low_speed_scale: 1.0 # (0, 1]; increase carefully if trained deltas are too small
+  low_speed_scale: 1 # (0, 1]; increase carefully if trained deltas are too small
   max_cartesian_delta: 0.01 # positive xyz delta-norm limit per arm and cycle
   max_rotation_delta: 0.02 # positive rotvec delta-norm limit per arm and cycle
 

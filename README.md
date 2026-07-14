@@ -398,6 +398,26 @@ cp third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.example.yaml \
 Set `FLEXIV_DP3_ROBOT_CONFIG=/absolute/path/to/config.yaml` to use another
 private config path. Never commit real robot or camera serial numbers.
 
+Run the independent perception-only check before enabling robot motion:
+
+```bash
+conda run -n dp3 bash scripts/run_flexiv_dp3_perception_only.sh
+```
+
+When the `dp3` environment is already active:
+
+```bash
+bash scripts/run_flexiv_dp3_perception_only.sh
+```
+
+This program opens only the `head_rgb` RealSense and `PointCloudBuilder`; it
+does not import Flexiv RDK, connect either arm, or send actions. By default it
+discards 60 warmup frames, measures 300 frames, displays the raw/cropped/sampled
+perception stages, and writes per-frame JSONL plus a summary JSON under `logs/`.
+It exits with code 2 when the recent valid-depth median is below `0.75`, its
+range exceeds `0.08`, sampling pads a cloud, or a depth array does not own its
+memory. Add `--no-visualize` on a headless host.
+
 Run the complete policy deployment with one command:
 
 ```bash
@@ -412,7 +432,8 @@ bash scripts/run_flexiv_dual_arm_dp3_inference.sh
 
 This is the motion-producing `inference` path. It directly runs live RGB-D
 deprojection, crop, 1024-point sampling, policy prediction, action filtering,
-and `robot.send_action()`; there is no separate no-send stage or mode handoff. The default
+and `robot.send_action()`; it is separate from the no-motion perception-only
+entry point above. The default
 Open3D monitor runs in a separate process at 2 Hz with capacity-one latest-frame
 queues, so visualization cannot block the control loop.
 
