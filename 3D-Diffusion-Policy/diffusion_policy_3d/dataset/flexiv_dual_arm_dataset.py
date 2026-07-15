@@ -8,6 +8,24 @@ import torch
 import zarr
 
 from diffusion_policy_3d.common.pytorch_util import dict_apply
+from diffusion_policy_3d.common.flexiv_state_contract import (
+    FLEXIV_ACTION_DIM,
+    FLEXIV_LEGACY_STATE_SCHEMA,
+    FLEXIV_STATE_DIM,
+    FLEXIV_STATE_ROTATION_REFERENCE,
+    FLEXIV_STATE_ROTATION_REPRESENTATION,
+    FLEXIV_STATE_SCHEMA,
+    FLEXIV_ROTATION6D_CONVENTION,
+    FLEXIV_ROTATION6D_ORDER,
+    STATE_EE_POSITION_INDICES,
+    STATE_EE_ROTATION_6D_INDICES,
+    STATE_GRIPPER_INDICES,
+    STATE_JOINT_INDICES,
+    flexiv_action_names,
+    flexiv_legacy_state_names,
+    flexiv_state_names,
+    validate_flexiv_state_rotation6d,
+)
 from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
 from diffusion_policy_3d.common.sampler import (
     SequenceSampler,
@@ -21,18 +39,18 @@ from diffusion_policy_3d.model.common.normalizer import (
 )
 
 
-FLEXIV_NORMALIZER_SCHEMA = "flexiv_physical_v1"
-FLEXIV_STATE_DIM = 28
-FLEXIV_ACTION_DIM = 14
+FLEXIV_NORMALIZER_SCHEMA = FLEXIV_STATE_SCHEMA
 _LEFT_ACTION_XYZ = slice(0, 3)
 _LEFT_ACTION_ROTATION = slice(3, 6)
 _RIGHT_ACTION_XYZ = slice(6, 9)
 _RIGHT_ACTION_ROTATION = slice(9, 12)
 _ACTION_GRIPPERS = slice(12, 14)
-_STATE_JOINT_INDICES = np.asarray([*range(0, 7), *range(14, 21)], dtype=np.int64)
-_STATE_EE_POSITION_INDICES = np.asarray([*range(7, 10), *range(21, 24)], dtype=np.int64)
-_STATE_EE_ROTATION_INDICES = np.asarray([*range(10, 13), *range(24, 27)], dtype=np.int64)
-_STATE_GRIPPER_INDICES = np.asarray([13, 27], dtype=np.int64)
+_STATE_JOINT_INDICES = STATE_JOINT_INDICES
+_STATE_EE_POSITION_INDICES = STATE_EE_POSITION_INDICES
+_STATE_EE_ROTATION_INDICES = STATE_EE_ROTATION_6D_INDICES
+_STATE_GRIPPER_INDICES = STATE_GRIPPER_INDICES
+FLEXIV_STATE_FIELD_NAMES = tuple(flexiv_state_names())
+FLEXIV_ACTION_FIELD_NAMES = tuple(flexiv_action_names())
 
 
 class FlexivDualArmDataset(BaseDataset):
@@ -46,17 +64,21 @@ class FlexivDualArmDataset(BaseDataset):
         val_ratio=0.0,
         max_train_episodes=None,
         task_name=None,
-        expected_state_dim=28,
-        expected_action_dim=14,
+        expected_state_dim=FLEXIV_STATE_DIM,
+        expected_action_dim=FLEXIV_ACTION_DIM,
         expected_pointcloud_dim=None,
         expected_num_points=1024,
         normalizer_schema=FLEXIV_NORMALIZER_SCHEMA,
+        state_schema=FLEXIV_STATE_SCHEMA,
+        state_rotation_representation=FLEXIV_STATE_ROTATION_REPRESENTATION,
+        state_rotation_reference=FLEXIV_STATE_ROTATION_REFERENCE,
+        rotation6d_convention=FLEXIV_ROTATION6D_CONVENTION,
+        action_rotation_representation="rotvec",
         clip_actions_to_execution_limits=True,
         action_xyz_limit=0.02,
         action_rotation_limit=0.04,
         state_joint_range_floor=0.20,
         state_ee_position_range_floor=0.10,
-        state_ee_rotation_range_floor=0.20,
         normalizer_quantile_low=0.005,
         normalizer_quantile_high=0.995,
     ):
@@ -67,6 +89,32 @@ class FlexivDualArmDataset(BaseDataset):
             raise ValueError(
                 f"normalizer_schema must be {FLEXIV_NORMALIZER_SCHEMA!r}, "
                 f"got {normalizer_schema!r}"
+            )
+        if state_schema != FLEXIV_STATE_SCHEMA:
+            raise ValueError(
+                f"state_schema must be {FLEXIV_STATE_SCHEMA!r}, got {state_schema!r}"
+            )
+        if state_rotation_representation != FLEXIV_STATE_ROTATION_REPRESENTATION:
+            raise ValueError(
+                "state_rotation_representation must be "
+                f"{FLEXIV_STATE_ROTATION_REPRESENTATION!r}, "
+                f"got {state_rotation_representation!r}"
+            )
+        if state_rotation_reference != FLEXIV_STATE_ROTATION_REFERENCE:
+            raise ValueError(
+                "state_rotation_reference must be "
+                f"{FLEXIV_STATE_ROTATION_REFERENCE!r}, "
+                f"got {state_rotation_reference!r}"
+            )
+        if rotation6d_convention != FLEXIV_ROTATION6D_CONVENTION:
+            raise ValueError(
+                "rotation6d_convention must be "
+                f"{FLEXIV_ROTATION6D_CONVENTION!r}, got {rotation6d_convention!r}"
+            )
+        if action_rotation_representation != "rotvec":
+            raise ValueError(
+                "action_rotation_representation must be 'rotvec', "
+                f"got {action_rotation_representation!r}"
             )
         self.normalizer_schema = normalizer_schema
         self.clip_actions_to_execution_limits = _require_bool(
@@ -85,10 +133,6 @@ class FlexivDualArmDataset(BaseDataset):
         self.state_ee_position_range_floor = _positive_float(
             state_ee_position_range_floor,
             name="state_ee_position_range_floor",
-        )
-        self.state_ee_rotation_range_floor = _positive_float(
-            state_ee_rotation_range_floor,
-            name="state_ee_rotation_range_floor",
         )
         self.normalizer_quantile_low, self.normalizer_quantile_high = _quantile_bounds(
             normalizer_quantile_low,
@@ -159,7 +203,6 @@ class FlexivDualArmDataset(BaseDataset):
             agent_pos,
             joint_range_floor=self.state_joint_range_floor,
             ee_position_range_floor=self.state_ee_position_range_floor,
-            ee_rotation_range_floor=self.state_ee_rotation_range_floor,
             quantile_low=self.normalizer_quantile_low,
             quantile_high=self.normalizer_quantile_high,
         )
@@ -177,7 +220,6 @@ class FlexivDualArmDataset(BaseDataset):
             action_rotation_limit=self.action_rotation_limit,
             state_joint_range_floor=self.state_joint_range_floor,
             state_ee_position_range_floor=self.state_ee_position_range_floor,
-            state_ee_rotation_range_floor=self.state_ee_rotation_range_floor,
         )
         return normalizer
 
@@ -239,7 +281,6 @@ def _make_state_normalizer(
     *,
     joint_range_floor: float,
     ee_position_range_floor: float,
-    ee_rotation_range_floor: float,
     quantile_low: float,
     quantile_high: float,
 ) -> SingleFieldLinearNormalizer:
@@ -248,6 +289,7 @@ def _make_state_normalizer(
         raise ValueError(
             f"Flexiv state must have shape (T, {FLEXIV_STATE_DIM}), got {values.shape}"
         )
+    validate_flexiv_state_rotation6d(values, context="Flexiv dataset state")
     lower = np.quantile(values, quantile_low, axis=0).astype(np.float32)
     upper = np.quantile(values, quantile_high, axis=0).astype(np.float32)
     center = (lower + upper) * 0.5
@@ -260,14 +302,17 @@ def _make_state_normalizer(
         effective_range[_STATE_EE_POSITION_INDICES],
         ee_position_range_floor,
     )
-    effective_range[_STATE_EE_ROTATION_INDICES] = np.maximum(
-        effective_range[_STATE_EE_ROTATION_INDICES],
-        ee_rotation_range_floor,
-    )
     center[_STATE_GRIPPER_INDICES] = 0.5
     effective_range[_STATE_GRIPPER_INDICES] = 1.0
+    center[_STATE_EE_ROTATION_INDICES] = 0.0
+    effective_range[_STATE_EE_ROTATION_INDICES] = 2.0
     scale = 2.0 / effective_range
     offset = -center * scale
+    # Rotation-6D values are dimensionless matrix columns. They are a fixed
+    # representation contract, not a low-variance physical signal to stretch
+    # with quantiles or a radian range floor.
+    scale[_STATE_EE_ROTATION_INDICES] = 1.0
+    offset[_STATE_EE_ROTATION_INDICES] = 0.0
     return _manual_normalizer(
         values,
         scale=scale.astype(np.float32),
@@ -310,10 +355,10 @@ def _audit_normalizer(
     action_rotation_limit: float,
     state_joint_range_floor: float,
     state_ee_position_range_floor: float,
-    state_ee_rotation_range_floor: float,
 ) -> None:
     action_scale = normalizer["action"].params_dict["scale"].detach().cpu().numpy()
     state_scale = normalizer["agent_pos"].params_dict["scale"].detach().cpu().numpy()
+    state_offset = normalizer["agent_pos"].params_dict["offset"].detach().cpu().numpy()
     expected_action_scale = np.asarray(
         [
             *([1.0 / action_xyz_limit] * 3),
@@ -330,8 +375,36 @@ def _audit_normalizer(
     maximum_state_scales = np.full(FLEXIV_STATE_DIM, np.inf, dtype=np.float32)
     maximum_state_scales[_STATE_JOINT_INDICES] = 2.0 / state_joint_range_floor
     maximum_state_scales[_STATE_EE_POSITION_INDICES] = 2.0 / state_ee_position_range_floor
-    maximum_state_scales[_STATE_EE_ROTATION_INDICES] = 2.0 / state_ee_rotation_range_floor
+    maximum_state_scales[_STATE_EE_ROTATION_INDICES] = 1.0
     maximum_state_scales[_STATE_GRIPPER_INDICES] = 2.0
+    if not np.allclose(
+        state_scale[_STATE_EE_ROTATION_INDICES],
+        1.0,
+        rtol=0.0,
+        atol=1e-7,
+    ) or not np.allclose(
+        state_offset[_STATE_EE_ROTATION_INDICES],
+        0.0,
+        rtol=0.0,
+        atol=1e-7,
+    ):
+        raise RuntimeError(
+            "Flexiv v2 rotation-6D normalizer must use fixed scale=1 and offset=0"
+        )
+    if not np.allclose(
+        state_scale[_STATE_GRIPPER_INDICES],
+        2.0,
+        rtol=0.0,
+        atol=1e-7,
+    ) or not np.allclose(
+        state_offset[_STATE_GRIPPER_INDICES],
+        -1.0,
+        rtol=0.0,
+        atol=1e-7,
+    ):
+        raise RuntimeError(
+            "Flexiv state gripper normalizer must map [0, 1] to [-1, 1]"
+        )
     if np.any(state_scale > maximum_state_scales + 1e-5):
         indices = np.flatnonzero(state_scale > maximum_state_scales + 1e-5).tolist()
         raise RuntimeError(f"Flexiv state normalizer exceeded range-floor scale at indices {indices}")
@@ -343,8 +416,7 @@ def _audit_normalizer(
         f"action_rotation_limit={action_rotation_limit:g}rad "
         f"execution_clipped_frames={int(np.count_nonzero(changed))}/{action_raw.shape[0]} "
         f"state_range_floors=(joint={state_joint_range_floor:g}rad,"
-        f"xyz={state_ee_position_range_floor:g}m,"
-        f"rotation={state_ee_rotation_range_floor:g}rad) "
+        f"xyz={state_ee_position_range_floor:g}m,rotation6d=fixed) "
         f"max_state_scale={float(np.max(state_scale)):.6g}"
     )
 
@@ -399,6 +471,64 @@ def _validate_zarr_schema(
             f"Zarr export is not complete: export_status={export_status!r}; "
             "re-export the dataset before training"
         )
+    required_attrs = {
+        "state_schema": FLEXIV_STATE_SCHEMA,
+        "state_dim": FLEXIV_STATE_DIM,
+        "action_dim": FLEXIV_ACTION_DIM,
+        "state_names": list(FLEXIV_STATE_FIELD_NAMES),
+        "action_names": list(FLEXIV_ACTION_FIELD_NAMES),
+        "state_rotation_representation": FLEXIV_STATE_ROTATION_REPRESENTATION,
+        "state_rotation_reference": FLEXIV_STATE_ROTATION_REFERENCE,
+        "rotation6d_convention": FLEXIV_ROTATION6D_CONVENTION,
+        "rotation6d_order": list(FLEXIV_ROTATION6D_ORDER),
+        "action_rotation_representation": "rotvec",
+    }
+    for key, expected in required_attrs.items():
+        actual = root.attrs.get(key)
+        if actual != expected:
+            raise ValueError(
+                f"Zarr Flexiv v2 contract mismatch for {key}: "
+                f"expected {expected!r}, got {actual!r}. "
+                "Legacy v1 Zarr must be explicitly re-exported."
+            )
+    source_schema = root.attrs.get("source_state_schema")
+    source_transform = root.attrs.get("state_transform")
+    if source_schema not in {FLEXIV_STATE_SCHEMA, FLEXIV_LEGACY_STATE_SCHEMA}:
+        raise ValueError(f"Unknown Zarr source_state_schema: {source_schema!r}")
+    expected_transform = (
+        "passthrough_v2"
+        if source_schema == FLEXIV_STATE_SCHEMA
+        else "legacy_abs_rotvec_to_abs_rot6d"
+    )
+    if source_transform != expected_transform:
+        raise ValueError(
+            "Zarr source_state_schema/state_transform pairing is invalid: "
+            f"schema={source_schema!r}, transform={source_transform!r}, "
+            f"expected={expected_transform!r}"
+        )
+    expected_source_names = (
+        FLEXIV_STATE_FIELD_NAMES
+        if source_schema == FLEXIV_STATE_SCHEMA
+        else tuple(flexiv_legacy_state_names())
+    )
+    if tuple(root.attrs.get("source_state_names") or ()) != expected_source_names:
+        raise ValueError(
+            "Zarr source_state_names/order does not match source_state_schema"
+        )
+    if "source_fps" not in root.attrs:
+        raise ValueError("Zarr export is missing source_fps metadata")
+    for key in (
+        "raw_source_state_sha256",
+        "derived_state_sha256",
+        "exported_state_sha256",
+    ):
+        digest = root.attrs.get(key)
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError(f"Zarr export is missing valid {key} provenance")
+        try:
+            int(digest, 16)
+        except ValueError as exc:
+            raise ValueError(f"Zarr export has invalid {key} provenance") from exc
     if "data" not in root:
         raise KeyError("Missing zarr group: data")
     if "meta" not in root:
@@ -452,6 +582,10 @@ def _validate_zarr_schema(
             f"episode_ends[-1] ({episode_ends[-1]}) does not equal T ({total_steps})"
         )
 
+    if int(state.shape[1]) != FLEXIV_STATE_DIM:
+        raise ValueError(f"data/state dim {state.shape[1]} != {FLEXIV_STATE_DIM}")
+    if int(action.shape[1]) != FLEXIV_ACTION_DIM:
+        raise ValueError(f"data/action dim {action.shape[1]} != {FLEXIV_ACTION_DIM}")
     if expected_state_dim is not None and int(state.shape[1]) != int(expected_state_dim):
         raise ValueError(f"data/state dim {state.shape[1]} != {expected_state_dim}")
     if expected_action_dim is not None and int(action.shape[1]) != int(expected_action_dim):
@@ -466,6 +600,10 @@ def _validate_zarr_schema(
         raise ValueError(f"data/point_cloud dim must be 3 or 6, got {pointcloud_dim}")
     if expected_num_points is not None and int(point_cloud.shape[1]) != int(expected_num_points):
         raise ValueError(f"data/point_cloud points {point_cloud.shape[1]} != {expected_num_points}")
+    validate_flexiv_state_rotation6d(
+        np.asarray(state[:]),
+        context="Zarr data/state",
+    )
 
     integrity = root.attrs.get("integrity")
     if not isinstance(integrity, dict):
@@ -484,6 +622,17 @@ def _validate_zarr_schema(
                 f"Zarr data/{key} checksum mismatch: "
                 f"actual={actual_hash}, expected={expected_hash}"
             )
+    for key in ("raw_source_state", "derived_state"):
+        if not isinstance(integrity.get(key), str):
+            raise ValueError(f"Zarr export is missing integrity provenance {key}")
+    if integrity["derived_state"] != integrity["state"]:
+        raise ValueError("Zarr derived_state integrity does not match data/state")
+    if root.attrs["raw_source_state_sha256"] != integrity["raw_source_state"]:
+        raise ValueError("Zarr raw source state provenance does not match integrity metadata")
+    if root.attrs["derived_state_sha256"] != integrity["derived_state"]:
+        raise ValueError("Zarr derived state provenance does not match integrity metadata")
+    if root.attrs["exported_state_sha256"] != integrity["state"]:
+        raise ValueError("Zarr exported state provenance does not match data/state")
 
     return {
         "state_shape": tuple(state.shape),

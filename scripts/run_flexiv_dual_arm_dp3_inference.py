@@ -263,10 +263,32 @@ _CONSISTENCY_FIELDS = (
     ("shape_meta.action.shape", "shape_meta.action.shape"),
 )
 
+_FLEXIV_CONTRACT_FIELDS = (
+    ("task.dataset.state_schema", "flexiv_contract.state_schema"),
+    ("task.dataset.normalizer_schema", "flexiv_contract.normalizer_schema"),
+    (
+        "task.dataset.state_rotation_representation",
+        "flexiv_contract.state_rotation_representation",
+    ),
+    ("task.dataset.state_rotation_reference", "flexiv_contract.state_rotation_reference"),
+    ("task.dataset.rotation6d_convention", "flexiv_contract.rotation6d_convention"),
+    (
+        "task.dataset.action_rotation_representation",
+        "flexiv_contract.action_rotation_representation",
+    ),
+)
+
 
 def _validate_checkpoint_inference_config(checkpoint_cfg: Any, inference_cfg: Mapping[str, Any]) -> None:
     mismatches = []
     for checkpoint_key, inference_key in _CONSISTENCY_FIELDS:
+        actual = _plain_config_value(OmegaConf.select(checkpoint_cfg, checkpoint_key))
+        expected = _plain_config_value(_mapping_select(inference_cfg, inference_key))
+        if actual != expected:
+            mismatches.append(
+                f"{checkpoint_key}: checkpoint={actual!r}, inference_config={expected!r}"
+            )
+    for checkpoint_key, inference_key in _FLEXIV_CONTRACT_FIELDS:
         actual = _plain_config_value(OmegaConf.select(checkpoint_cfg, checkpoint_key))
         expected = _plain_config_value(_mapping_select(inference_cfg, inference_key))
         if actual != expected:
@@ -338,6 +360,15 @@ def main() -> int:
         normalizer_audit = validate_flexiv_normalizer_contract(
             policy,
             normalizer_schema=OmegaConf.select(cfg, "task.dataset.normalizer_schema"),
+            state_schema=OmegaConf.select(cfg, "task.dataset.state_schema"),
+            rotation6d_convention=OmegaConf.select(
+                cfg,
+                "task.dataset.rotation6d_convention",
+            ),
+            action_rotation_representation=OmegaConf.select(
+                cfg,
+                "task.dataset.action_rotation_representation",
+            ),
             clip_actions_to_execution_limits=OmegaConf.select(
                 cfg,
                 "task.dataset.clip_actions_to_execution_limits",
@@ -354,10 +385,6 @@ def main() -> int:
             state_ee_position_range_floor=OmegaConf.select(
                 cfg,
                 "task.dataset.state_ee_position_range_floor",
-            ),
-            state_ee_rotation_range_floor=OmegaConf.select(
-                cfg,
-                "task.dataset.state_ee_rotation_range_floor",
             ),
         )
     except ValueError as exc:
@@ -1231,13 +1258,21 @@ def _dump_sampled_pointcloud(
 
 def _agent_pos_summary(agent_pos: Any, *, observation: Mapping[str, Any] | None = None) -> dict[str, Any]:
     values = agent_pos.reshape(-1)
+    left_rotation = values[10:16]
+    right_rotation = values[27:33]
     summary = {
         "dim": int(values.shape[0]),
         "min": float(values.min()),
         "max": float(values.max()),
         "mean": float(values.mean()),
-        "left_gripper_state_norm": float(values[13]) if values.shape[0] > 13 else None,
-        "right_gripper_state_norm": float(values[27]) if values.shape[0] > 27 else None,
+        "left_gripper_state_norm": float(values[16]) if values.shape[0] > 16 else None,
+        "right_gripper_state_norm": float(values[33]) if values.shape[0] > 33 else None,
+        "left_rotation6d_c0_norm": float(np.linalg.norm(left_rotation[:3])),
+        "left_rotation6d_c1_norm": float(np.linalg.norm(left_rotation[3:])),
+        "left_rotation6d_c0_c1_dot": float(np.dot(left_rotation[:3], left_rotation[3:])),
+        "right_rotation6d_c0_norm": float(np.linalg.norm(right_rotation[:3])),
+        "right_rotation6d_c1_norm": float(np.linalg.norm(right_rotation[3:])),
+        "right_rotation6d_c0_c1_dot": float(np.dot(right_rotation[:3], right_rotation[3:])),
     }
     if observation is not None:
         for side in ("left", "right"):
@@ -1796,6 +1831,22 @@ def _validate_adapter_feature_contract(
     robot_config = getattr(robot, "config", None)
     robot_uses_gripper = bool(getattr(robot_config, "use_gripper", True))
     base_name = _camera_base_name(camera_name)
+    state_feature_order = tuple(
+        key for key in observation_features if key in set(STATE_FIELD_NAMES)
+    )
+    if state_feature_order != STATE_FIELD_NAMES:
+        raise SystemExit(
+            "Flexiv adapter observation_features state order does not match the DP3 v2 "
+            f"contract: expected {list(STATE_FIELD_NAMES)!r}, got {list(state_feature_order)!r}"
+        )
+    action_feature_order = tuple(
+        key for key in action_features if key in set(ACTION_FIELD_NAMES)
+    )
+    if action_feature_order != ACTION_FIELD_NAMES:
+        raise SystemExit(
+            "Flexiv adapter action_features order does not match the DP3 14D "
+            f"contract: expected {list(ACTION_FIELD_NAMES)!r}, got {list(action_feature_order)!r}"
+        )
 
     missing_obs = []
     for key in STATE_FIELD_NAMES:
@@ -2081,6 +2132,11 @@ def _config_check_summary(
         "n_obs_steps": contract.n_obs_steps,
         "state_dim": contract.state_dim,
         "action_dim": contract.action_dim,
+        "state_schema": contract.state_schema,
+        "state_rotation_representation": contract.state_rotation_representation,
+        "state_rotation_reference": contract.state_rotation_reference,
+        "rotation6d_convention": contract.rotation6d_convention,
+        "action_rotation_representation": contract.action_rotation_representation,
         "point_cloud": {
             "points": contract.pointcloud_points,
             "dim": contract.pointcloud_dim,

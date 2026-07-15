@@ -59,6 +59,16 @@ both YAML files:
   type;
 - point-cloud, robot-state, and action shapes;
 
+For the Flexiv real task, startup additionally requires
+`state_schema=flexiv_abs_rot6d_v2`, `state_dim=34`,
+`state_rotation_representation=rotation_6d`,
+`rotation6d_convention=matrix_columns_0_1`,
+`normalizer_schema=flexiv_abs_rot6d_v2`, `action_dim=14`, and
+`action_rotation_representation=rotvec`. State orientation is absolute RDK
+world/base TCP orientation encoded as the first two matrix columns
+`[R[:, 0], R[:, 1]]`; it is not Home-relative. The action remains delta rotvec.
+An old v1 checkpoint is rejected before robot connection.
+
 Before hardware connection, the launcher compares these fields with the Hydra
 configuration stored in the checkpoint. A mismatch stops startup with a list of
 the differing fields. Editing the current training YAML does not alter an
@@ -131,8 +141,8 @@ n_obs_steps             2
 n_action_steps          4
 inference_scheduler  DDIM
 num_inference_steps    10
-point_cloud       [1024, 3]
-agent_pos             [28]
+point_cloud       [2048, 3]
+agent_pos             [34]
 action                [14]
 action_mode         chunk
 rate_hz                30
@@ -154,7 +164,7 @@ Review these fields in `dp3_inference_config.yaml` before starting:
 
 ```yaml
 checkpoint:
-  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3_seed42/checkpoints/latest.ckpt
+  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3-abs-rot6d-v2_seed1000/checkpoints/latest.ckpt
 robot:
   config: ${oc.env:FLEXIV_DP3_ROBOT_CONFIG,third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml}
   enable_on_connect: true
@@ -198,8 +208,8 @@ Every 30 Hz control cycle performs:
 1. read live Flexiv joints, end-effector poses, gripper widths, RGB, and depth;
 2. deproject the RGB-D frame once with PointCloudBuilder;
 3. crop in the configured camera-space workspace;
-4. sample the exact 1024-point policy input;
-5. build and stack the 28D robot-state observation;
+4. sample the exact 2048-point policy input;
+5. build and stack the 34D absolute rotation-6D robot-state observation;
 6. when the configured action queue is empty, run `policy.predict_action()` and
    enqueue the complete returned chunk;
 7. otherwise retain the new observation as part of the two-frame history;

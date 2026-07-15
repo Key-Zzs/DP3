@@ -13,8 +13,14 @@ sys.path.insert(0, str(ROOT / "3D-Diffusion-Policy"))
 
 zarr = pytest.importorskip("zarr")
 
+from diffusion_policy_3d.common.flexiv_state_contract import (  # noqa: E402
+    flexiv_action_names,
+    flexiv_state_names,
+)
 from diffusion_policy_3d.dataset.flexiv_dual_arm_dataset import (  # noqa: E402
+    FLEXIV_ACTION_DIM,
     FLEXIV_NORMALIZER_SCHEMA,
+    FLEXIV_STATE_DIM,
     FlexivDualArmDataset,
 )
 
@@ -22,8 +28,8 @@ from diffusion_policy_3d.dataset.flexiv_dual_arm_dataset import (  # noqa: E402
 def _write_zarr(
     path: Path,
     *,
-    state_dim: int = 28,
-    action_dim: int = 14,
+    state_dim: int = FLEXIV_STATE_DIM,
+    action_dim: int = FLEXIV_ACTION_DIM,
     pc_dim: int = 3,
     state_values: np.ndarray | None = None,
     action_values: np.ndarray | None = None,
@@ -34,11 +40,14 @@ def _write_zarr(
     total_steps = 5 if state_values is None and action_values is None else int(
         state_values.shape[0] if state_values is not None else action_values.shape[0]
     )
-    state_data = (
-        np.zeros((total_steps, state_dim), dtype=np.float32)
-        if state_values is None
-        else np.asarray(state_values, dtype=np.float32)
-    )
+    state_data = np.zeros((total_steps, state_dim), dtype=np.float32)
+    if state_values is not None:
+        state_data = np.asarray(state_values, dtype=np.float32)
+    if state_values is None and state_dim == FLEXIV_STATE_DIM:
+        state_data[:, 10:16] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        state_data[:, 27:33] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        state_data[:, 16] = 0.5
+        state_data[:, 33] = 0.5
     action_data = (
         np.zeros((total_steps, action_dim), dtype=np.float32)
         if action_values is None
@@ -73,7 +82,26 @@ def _write_zarr(
                 "state": _sha256(state[:]),
                 "action": _sha256(action[:]),
                 "point_cloud": _sha256(point_cloud[:]),
+                "raw_source_state": _sha256(state_data),
+                "derived_state": _sha256(state_data),
             },
+            "state_schema": "flexiv_abs_rot6d_v2",
+            "state_dim": FLEXIV_STATE_DIM,
+            "action_dim": FLEXIV_ACTION_DIM,
+            "state_names": flexiv_state_names(),
+            "action_names": flexiv_action_names(),
+            "state_rotation_representation": "rotation_6d",
+            "state_rotation_reference": "absolute_rdk_world_base",
+            "rotation6d_convention": "matrix_columns_0_1",
+            "rotation6d_order": ["c0x", "c0y", "c0z", "c1x", "c1y", "c1z"],
+            "action_rotation_representation": "rotvec",
+            "source_state_schema": "flexiv_abs_rot6d_v2",
+            "source_state_names": flexiv_state_names(),
+            "state_transform": "passthrough_v2",
+            "source_fps": 30,
+            "raw_source_state_sha256": _sha256(state_data),
+            "derived_state_sha256": _sha256(state_data),
+            "exported_state_sha256": _sha256(state_data),
         }
     )
 
@@ -97,7 +125,7 @@ def test_flexiv_dataset_reads_xyz_zarr(tmp_path: Path) -> None:
     )
 
     sample = dataset[0]
-    assert sample["obs"]["agent_pos"].shape == (4, 28)
+    assert sample["obs"]["agent_pos"].shape == (4, FLEXIV_STATE_DIM)
     assert sample["obs"]["point_cloud"].shape == (4, 8, 3)
     assert sample["action"].shape == (4, 14)
 
@@ -106,7 +134,7 @@ def test_flexiv_dataset_rejects_wrong_state_dim(tmp_path: Path) -> None:
     zarr_path = tmp_path / "bad_state.zarr"
     _write_zarr(zarr_path, state_dim=27)
 
-    with pytest.raises(ValueError, match="data/state dim 27 != 28"):
+    with pytest.raises(ValueError, match="data/state dim 27 != 34"):
         FlexivDualArmDataset(
             zarr_path=str(zarr_path),
             expected_num_points=8,
@@ -142,6 +170,19 @@ def test_flexiv_dataset_rejects_checksum_mismatch(tmp_path: Path) -> None:
         )
 
 
+def test_flexiv_dataset_rejects_v1_zarr_contract(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "legacy.zarr"
+    _write_zarr(zarr_path)
+    root = zarr.open(str(zarr_path), mode="a")
+    root.attrs["state_schema"] = "flexiv_physical_v1"
+    with pytest.raises(ValueError, match="v2 contract mismatch for state_schema"):
+        FlexivDualArmDataset(
+            zarr_path=str(zarr_path),
+            expected_num_points=8,
+            expected_pointcloud_dim=3,
+        )
+
+
 def test_flexiv_dataset_clips_raw_teleop_action_to_execution_contract(tmp_path: Path) -> None:
     zarr_path = tmp_path / "action_clip.zarr"
     actions = np.zeros((5, 14), dtype=np.float32)
@@ -168,11 +209,13 @@ def test_flexiv_dataset_clips_raw_teleop_action_to_execution_contract(tmp_path: 
     assert applied[12:14] == pytest.approx([0.0, 1.0])
 
 
-def test_flexiv_physical_normalizer_is_symmetric_and_range_floored(tmp_path: Path) -> None:
+def test_flexiv_rot6d_normalizer_is_symmetric_and_range_floored(tmp_path: Path) -> None:
     zarr_path = tmp_path / "physical_normalizer.zarr"
-    states = np.zeros((5, 28), dtype=np.float32)
-    states[:, 13] = np.linspace(0.0, 1.0, 5)
-    states[:, 27] = 1.0
+    states = np.zeros((5, FLEXIV_STATE_DIM), dtype=np.float32)
+    states[:, 10:16] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    states[:, 27:33] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    states[:, 16] = np.linspace(0.0, 1.0, 5)
+    states[:, 33] = 1.0
     actions = np.zeros((5, 14), dtype=np.float32)
     actions[:, 12] = np.linspace(0.0, 1.0, 5)
     actions[:, 13] = 1.0
@@ -195,13 +238,13 @@ def test_flexiv_physical_normalizer_is_symmetric_and_range_floored(tmp_path: Pat
     assert action_scale[9:12] == pytest.approx([25.0, 25.0, 25.0])
     assert action_scale[12:14] == pytest.approx([2.0, 2.0])
     assert action_offset == pytest.approx([*([0.0] * 12), -1.0, -1.0])
-    assert state_scale[[0, 14]] == pytest.approx([10.0, 10.0])
-    assert state_scale[[7, 21]] == pytest.approx([20.0, 20.0])
-    assert state_scale[[10, 24]] == pytest.approx([10.0, 10.0])
-    assert state_scale[[13, 27]] == pytest.approx([2.0, 2.0])
+    assert state_scale[[0, 17]] == pytest.approx([10.0, 10.0])
+    assert state_scale[[7, 24]] == pytest.approx([20.0, 20.0])
+    assert state_scale[np.r_[10:16, 27:33]] == pytest.approx(np.ones(12))
+    assert state_scale[[16, 33]] == pytest.approx([2.0, 2.0])
 
 
-def test_flexiv_physical_normalizer_roundtrips_applied_action(tmp_path: Path) -> None:
+def test_flexiv_rot6d_normalizer_roundtrips_applied_action(tmp_path: Path) -> None:
     zarr_path = tmp_path / "normalizer_roundtrip.zarr"
     actions = np.zeros((5, 14), dtype=np.float32)
     actions[:, 12:14] = 1.0

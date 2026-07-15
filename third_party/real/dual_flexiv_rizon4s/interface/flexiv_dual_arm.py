@@ -17,6 +17,27 @@ from .realsense_camera import make_cameras_from_configs
 logger = logging.getLogger(__name__)
 
 AXES = ("x", "y", "z", "rx", "ry", "rz")
+FLEXIV_STATE_SCHEMA = "flexiv_abs_rot6d_v2"
+FLEXIV_STATE_DIM = 34
+FLEXIV_ACTION_DIM = 14
+FLEXIV_STATE_ROTATION_REPRESENTATION = "rotation_6d"
+FLEXIV_STATE_ROTATION_REFERENCE = "absolute_rdk_world_base"
+FLEXIV_ROTATION6D_CONVENTION = "matrix_columns_0_1"
+FLEXIV_ROTATION6D_ORDER = ("c0x", "c0y", "c0z", "c1x", "c1y", "c1z")
+STATE_FIELD_NAMES = tuple(
+    name
+    for side in ("left", "right")
+    for name in (
+        *(f"{side}_joint_{index}.pos" for index in range(1, 8)),
+        *(f"{side}_ee_pose.{axis}" for axis in ("x", "y", "z")),
+        *(f"{side}_ee_rotation_6d.{component}" for component in FLEXIV_ROTATION6D_ORDER),
+        f"{side}_gripper_state_norm",
+    )
+)
+ACTION_FIELD_NAMES = tuple(
+    [f"{side}_delta_ee_pose.{axis}" for side in ("left", "right") for axis in AXES]
+    + ["left_gripper_cmd", "right_gripper_cmd"]
+)
 GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001
 
 
@@ -91,6 +112,35 @@ def _pose7_to_pose6(pose7: Any) -> np.ndarray:
         except ValueError:
             rotvec = np.zeros(3, dtype=float)
     return np.concatenate([pose[:3], rotvec])
+
+
+def _rotation_matrix_to_rot6d(rotation_matrix: Any) -> np.ndarray:
+    matrix = np.asarray(rotation_matrix, dtype=float)
+    if matrix.shape != (3, 3):
+        raise ValueError(f"rotation matrix must have shape (3, 3), got {matrix.shape}")
+    if not np.isfinite(matrix).all():
+        raise ValueError("rotation matrix contains NaN or Inf")
+    # The contract is explicitly the first two columns, never a reshape.
+    rotation_6d = np.concatenate((matrix[:, 0], matrix[:, 1]))
+    c0, c1 = rotation_6d[:3], rotation_6d[3:]
+    if not np.isclose(np.linalg.norm(c0), 1.0, atol=1e-4):
+        raise ValueError("rotation-6D c0 is not unit length")
+    if not np.isclose(np.linalg.norm(c1), 1.0, atol=1e-4):
+        raise ValueError("rotation-6D c1 is not unit length")
+    if not np.isclose(np.dot(c0, c1), 0.0, atol=1e-4):
+        raise ValueError("rotation-6D c0/c1 are not orthogonal")
+    return rotation_6d
+
+
+def _pose7_to_absolute_xyz_rot6d(pose7: Any) -> np.ndarray:
+    """Convert RDK [xyz, qw, qx, qy, qz] to absolute v2 state values."""
+
+    pose = _as_np(pose7, 7)
+    quat_xyzw = _rdk_quat_wxyz_to_scipy_xyzw(pose[3:7])
+    if np.linalg.norm(quat_xyzw) < 1e-12:
+        raise ValueError("RDK TCP quaternion has zero norm")
+    rotation = Rotation.from_quat(quat_xyzw)
+    return np.concatenate((pose[:3], _rotation_matrix_to_rot6d(rotation.as_matrix())))
 
 
 def _apply_delta_to_pose7(current_pose7: np.ndarray, delta6: np.ndarray) -> np.ndarray:
@@ -1550,7 +1600,7 @@ class FlexivDualArm:
         pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
         if np.linalg.norm(pose7[3:7]) < 1e-12:
             pose7[3] = 1.0
-        pose6 = _pose7_to_pose6(pose7)
+        pose10 = _pose7_to_absolute_xyz_rot6d(pose7)
 
         if side == "left":
             self._cached_left_pose7 = pose7.copy()
@@ -1559,8 +1609,10 @@ class FlexivDualArm:
 
         for index, value in enumerate(joints, start=1):
             obs[f"{side}_joint_{index}.pos"] = float(value)
-        for index, axis in enumerate(AXES):
-            obs[f"{side}_ee_pose.{axis}"] = float(pose6[index])
+        for index, axis in enumerate(("x", "y", "z")):
+            obs[f"{side}_ee_pose.{axis}"] = float(pose10[index])
+        for index, component in enumerate(FLEXIV_ROTATION6D_ORDER, start=3):
+            obs[f"{side}_ee_rotation_6d.{component}"] = float(pose10[index])
 
         if self.config.use_gripper:
             cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
@@ -1865,8 +1917,10 @@ class FlexivDualArm:
         for side in ("left", "right"):
             for index in range(self._num_joints_per_arm):
                 features[f"{side}_joint_{index + 1}.pos"] = float
-            for axis in AXES:
+            for axis in ("x", "y", "z"):
                 features[f"{side}_ee_pose.{axis}"] = float
+            for component in FLEXIV_ROTATION6D_ORDER:
+                features[f"{side}_ee_rotation_6d.{component}"] = float
             if self.config.use_gripper:
                 features[f"{side}_gripper_state_norm"] = float
         return features

@@ -26,10 +26,18 @@ shape_meta:
       shape: [2048, 3]
       type: point_cloud
     agent_pos:
-      shape: [28]
+      shape: [34]
       type: low_dim
   action:
     shape: [14]
+
+flexiv_contract:
+  state_schema: flexiv_abs_rot6d_v2
+  normalizer_schema: flexiv_abs_rot6d_v2
+  state_rotation_representation: rotation_6d
+  state_rotation_reference: absolute_rdk_world_base
+  rotation6d_convention: matrix_columns_0_1
+  action_rotation_representation: rotvec
 
 policy:
   _target_: ${algorithm_profiles.${algorithm}.policy_target}
@@ -82,7 +90,7 @@ use_ema: true
 # Inference-only parameters.
 # -----------------------------------------------------------------------------
 checkpoint:
-  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3-10ep-pc2048-physical-norm-v1_seed1000/checkpoints/latest.ckpt
+  path: outputs/flexiv_dual_arm_head_xyz-simple_dp3-abs-rot6d-v2_seed1000/checkpoints/latest.ckpt
 
 robot:
   # Copy flexiv_runtime.example.yaml to the gitignored local path, fill the

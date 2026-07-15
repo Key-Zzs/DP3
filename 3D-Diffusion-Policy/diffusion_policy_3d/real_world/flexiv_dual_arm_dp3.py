@@ -15,24 +15,33 @@ from typing import Any
 import numpy as np
 import torch
 
+from diffusion_policy_3d.common.flexiv_state_contract import (
+    FLEXIV_ACTION_DIM,
+    FLEXIV_STATE_DIM,
+    FLEXIV_STATE_ROTATION_REFERENCE,
+    FLEXIV_STATE_ROTATION_REPRESENTATION,
+    FLEXIV_STATE_SCHEMA,
+    FLEXIV_ROTATION6D_CONVENTION,
+    STATE_EE_POSITION_INDICES,
+    STATE_EE_ROTATION_6D_INDICES,
+    STATE_GRIPPER_INDICES,
+    STATE_JOINT_INDICES,
+    flexiv_action_names,
+    flexiv_state_names,
+    validate_flexiv_state_rotation6d,
+)
+
 AXES = ("x", "y", "z", "rx", "ry", "rz")
 SIDES = ("left", "right")
-FLEXIV_NORMALIZER_SCHEMA = "flexiv_physical_v1"
-
-STATE_FIELD_NAMES = tuple(
-    [f"left_joint_{idx}.pos" for idx in range(1, 8)]
-    + [f"left_ee_pose.{axis}" for axis in AXES]
-    + ["left_gripper_state_norm"]
-    + [f"right_joint_{idx}.pos" for idx in range(1, 8)]
-    + [f"right_ee_pose.{axis}" for axis in AXES]
-    + ["right_gripper_state_norm"]
-)
-
-ACTION_FIELD_NAMES = tuple(
-    [f"left_delta_ee_pose.{axis}" for axis in AXES]
-    + [f"right_delta_ee_pose.{axis}" for axis in AXES]
-    + ["left_gripper_cmd", "right_gripper_cmd"]
-)
+FLEXIV_NORMALIZER_SCHEMA = FLEXIV_STATE_SCHEMA
+STATE_FIELD_NAMES = tuple(flexiv_state_names())
+ACTION_FIELD_NAMES = tuple(flexiv_action_names())
+FLEXIV_STATE_INDEX_GROUPS = {
+    "joints": STATE_JOINT_INDICES.copy(),
+    "ee_position": STATE_EE_POSITION_INDICES.copy(),
+    "ee_rotation_6d": STATE_EE_ROTATION_6D_INDICES.copy(),
+    "grippers": STATE_GRIPPER_INDICES.copy(),
+}
 
 
 @dataclass(frozen=True)
@@ -42,6 +51,11 @@ class PolicyContract:
     action_dim: int
     pointcloud_points: int
     pointcloud_dim: int
+    state_schema: str | None = None
+    state_rotation_representation: str | None = None
+    state_rotation_reference: str | None = None
+    rotation6d_convention: str | None = None
+    action_rotation_representation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +158,23 @@ def policy_contract_from_cfg(cfg: Any) -> PolicyContract:
         action_dim=_positive_int(action_shape[0], label="action_dim"),
         pointcloud_points=_positive_int(pointcloud_shape[0], label="pointcloud_points"),
         pointcloud_dim=_positive_int(pointcloud_shape[1], label="pointcloud_dim"),
+        state_schema=_optional_cfg_value(cfg, "task.dataset.state_schema"),
+        state_rotation_representation=_optional_cfg_value(
+            cfg,
+            "task.dataset.state_rotation_representation",
+        ),
+        state_rotation_reference=_optional_cfg_value(
+            cfg,
+            "task.dataset.state_rotation_reference",
+        ),
+        rotation6d_convention=_optional_cfg_value(
+            cfg,
+            "task.dataset.rotation6d_convention",
+        ),
+        action_rotation_representation=_optional_cfg_value(
+            cfg,
+            "task.dataset.action_rotation_representation",
+        ),
     )
 
 
@@ -158,15 +189,42 @@ def validate_policy_contract(contract: PolicyContract) -> None:
 
     if n_obs_steps <= 0:
         raise ValueError(f"n_obs_steps must be positive, got {contract.n_obs_steps}")
-    if state_dim != len(STATE_FIELD_NAMES):
+    if state_dim != FLEXIV_STATE_DIM:
         raise ValueError(
-            f"Flexiv checkpoint state_dim must be {len(STATE_FIELD_NAMES)}, "
+            f"Flexiv checkpoint state_dim must be {FLEXIV_STATE_DIM}, "
             f"got {contract.state_dim}"
         )
-    if action_dim != len(ACTION_FIELD_NAMES):
+    if action_dim != FLEXIV_ACTION_DIM:
         raise ValueError(
-            f"Flexiv checkpoint action_dim must be {len(ACTION_FIELD_NAMES)}, "
+            f"Flexiv checkpoint action_dim must be {FLEXIV_ACTION_DIM}, "
             f"got {contract.action_dim}"
+        )
+    if contract.state_schema != FLEXIV_STATE_SCHEMA:
+        raise ValueError(
+            "Flexiv checkpoint state_schema must be "
+            f"{FLEXIV_STATE_SCHEMA!r}, got {contract.state_schema!r}"
+        )
+    if contract.state_rotation_representation != FLEXIV_STATE_ROTATION_REPRESENTATION:
+        raise ValueError(
+            "Flexiv checkpoint state rotation representation must be "
+            f"{FLEXIV_STATE_ROTATION_REPRESENTATION!r}, "
+            f"got {contract.state_rotation_representation!r}"
+        )
+    if contract.state_rotation_reference != FLEXIV_STATE_ROTATION_REFERENCE:
+        raise ValueError(
+            "Flexiv checkpoint state rotation reference must be "
+            f"{FLEXIV_STATE_ROTATION_REFERENCE!r}, "
+            f"got {contract.state_rotation_reference!r}"
+        )
+    if contract.rotation6d_convention != FLEXIV_ROTATION6D_CONVENTION:
+        raise ValueError(
+            "Flexiv checkpoint rotation6d convention must be "
+            f"{FLEXIV_ROTATION6D_CONVENTION!r}, got {contract.rotation6d_convention!r}"
+        )
+    if contract.action_rotation_representation != "rotvec":
+        raise ValueError(
+            "Flexiv checkpoint action rotation representation must be 'rotvec', "
+            f"got {contract.action_rotation_representation!r}"
         )
     if pointcloud_points <= 0:
         raise ValueError(
@@ -182,19 +240,35 @@ def validate_flexiv_normalizer_contract(
     policy: Any,
     *,
     normalizer_schema: Any,
+    state_schema: Any = None,
+    rotation6d_convention: Any = None,
+    action_rotation_representation: Any = None,
     clip_actions_to_execution_limits: Any,
     action_xyz_limit: Any,
     action_rotation_limit: Any,
     state_joint_range_floor: Any,
     state_ee_position_range_floor: Any,
-    state_ee_rotation_range_floor: Any,
 ) -> dict[str, Any]:
-    """Reject checkpoints that retain the unsafe generic static-arm normalizer."""
+    """Reject checkpoints that do not carry the v2 physical Flexiv contract."""
 
     if normalizer_schema != FLEXIV_NORMALIZER_SCHEMA:
         raise ValueError(
-            "Checkpoint does not declare the safe Flexiv physical normalizer "
+            "Checkpoint does not declare the Flexiv v2 normalizer "
             f"({FLEXIV_NORMALIZER_SCHEMA}); retrain it with the current DP3 train config"
+        )
+    if state_schema != FLEXIV_STATE_SCHEMA:
+        raise ValueError(
+            f"Checkpoint state_schema must be {FLEXIV_STATE_SCHEMA!r}, got {state_schema!r}"
+        )
+    if rotation6d_convention != FLEXIV_ROTATION6D_CONVENTION:
+        raise ValueError(
+            "Checkpoint rotation6d convention must be "
+            f"{FLEXIV_ROTATION6D_CONVENTION!r}, got {rotation6d_convention!r}"
+        )
+    if action_rotation_representation != "rotvec":
+        raise ValueError(
+            "Checkpoint action rotation representation must be 'rotvec', "
+            f"got {action_rotation_representation!r}"
         )
     if clip_actions_to_execution_limits is not True:
         raise ValueError(
@@ -213,10 +287,6 @@ def validate_flexiv_normalizer_contract(
         state_ee_position_range_floor,
         label="state_ee_position_range_floor",
     )
-    state_rotation_floor = _positive_float(
-        state_ee_rotation_range_floor,
-        label="state_ee_rotation_range_floor",
-    )
     normalizer = getattr(policy, "normalizer", None)
     if normalizer is None:
         raise ValueError("Checkpoint policy is missing its normalizer")
@@ -226,6 +296,7 @@ def validate_flexiv_normalizer_contract(
         action_scale = action_params["scale"].detach().cpu().numpy()
         action_offset = action_params["offset"].detach().cpu().numpy()
         state_scale = state_params["scale"].detach().cpu().numpy()
+        state_offset = state_params["offset"].detach().cpu().numpy()
     except (AttributeError, KeyError) as exc:
         raise ValueError("Checkpoint normalizer is missing Flexiv action/agent_pos parameters") from exc
     expected_action_scale = np.asarray(
@@ -240,7 +311,7 @@ def validate_flexiv_normalizer_contract(
         dtype=np.float32,
     )
     expected_action_offset = np.asarray([*([0.0] * 12), -1.0, -1.0], dtype=np.float32)
-    if action_scale.shape != (len(ACTION_FIELD_NAMES),) or not np.allclose(
+    if action_scale.shape != (FLEXIV_ACTION_DIM,) or not np.allclose(
         action_scale,
         expected_action_scale,
         rtol=1e-6,
@@ -249,7 +320,7 @@ def validate_flexiv_normalizer_contract(
         raise ValueError(
             "Checkpoint action normalizer does not match the configured physical limits"
         )
-    if action_offset.shape != (len(ACTION_FIELD_NAMES),) or not np.allclose(
+    if action_offset.shape != (FLEXIV_ACTION_DIM,) or not np.allclose(
         action_offset,
         expected_action_offset,
         rtol=0.0,
@@ -258,16 +329,49 @@ def validate_flexiv_normalizer_contract(
         raise ValueError(
             "Checkpoint action normalizer does not use zero-centered deltas and [0,1] grippers"
         )
-    if state_scale.shape != (len(STATE_FIELD_NAMES),) or not np.isfinite(state_scale).all():
+    if (
+        state_scale.shape != (FLEXIV_STATE_DIM,)
+        or state_offset.shape != (FLEXIV_STATE_DIM,)
+        or not np.isfinite(state_scale).all()
+        or not np.isfinite(state_offset).all()
+    ):
         raise ValueError("Checkpoint agent_pos normalizer scale is invalid")
-    maximum_state_scale = np.full(len(STATE_FIELD_NAMES), np.inf, dtype=np.float32)
-    joint_indices = [*range(0, 7), *range(14, 21)]
-    position_indices = [*range(7, 10), *range(21, 24)]
-    rotation_indices = [*range(10, 13), *range(24, 27)]
-    gripper_indices = [13, 27]
+    if not np.allclose(
+        state_scale[STATE_EE_ROTATION_6D_INDICES],
+        1.0,
+        rtol=0.0,
+        atol=1e-6,
+    ) or not np.allclose(
+        state_offset[STATE_EE_ROTATION_6D_INDICES],
+        0.0,
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        raise ValueError(
+            "Checkpoint rotation-6D normalizer must use fixed scale=1 and offset=0"
+        )
+    if not np.allclose(
+        state_scale[STATE_GRIPPER_INDICES],
+        2.0,
+        rtol=0.0,
+        atol=1e-6,
+    ) or not np.allclose(
+        state_offset[STATE_GRIPPER_INDICES],
+        -1.0,
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        raise ValueError(
+            "Checkpoint state gripper normalizer must map [0, 1] to [-1, 1]"
+        )
+    maximum_state_scale = np.full(FLEXIV_STATE_DIM, np.inf, dtype=np.float32)
+    joint_indices = STATE_JOINT_INDICES
+    position_indices = STATE_EE_POSITION_INDICES
+    rotation_indices = STATE_EE_ROTATION_6D_INDICES
+    gripper_indices = STATE_GRIPPER_INDICES
     maximum_state_scale[joint_indices] = 2.0 / joint_floor
     maximum_state_scale[position_indices] = 2.0 / position_floor
-    maximum_state_scale[rotation_indices] = 2.0 / state_rotation_floor
+    maximum_state_scale[rotation_indices] = 1.0
     maximum_state_scale[gripper_indices] = 2.0
     if np.any(state_scale > maximum_state_scale + 1e-5):
         indices = np.flatnonzero(state_scale > maximum_state_scale + 1e-5).tolist()
@@ -280,6 +384,8 @@ def validate_flexiv_normalizer_contract(
         "action_xyz_limit": xyz_limit,
         "action_rotation_limit": rotation_limit,
         "max_agent_pos_scale": float(np.max(state_scale)),
+        "rotation6d_scale": 1.0,
+        "rotation6d_offset": 0.0,
     }
 
 
@@ -321,7 +427,7 @@ def build_agent_pos(
     *,
     default_gripper_state: float | None = None,
 ) -> np.ndarray:
-    """Build the 28D Flexiv state vector used by training."""
+    """Build the strict 34D absolute rotation-6D Flexiv state vector."""
 
     values = []
     for key in STATE_FIELD_NAMES:
@@ -347,7 +453,12 @@ def validate_agent_pos(
         raise ValueError(f"agent_pos shape {values.shape} != ({int(expected_dim)},)")
     if not np.isfinite(values).all():
         raise ValueError("agent_pos contains NaN or Inf")
-    for index, key in ((13, "left_gripper_state_norm"), (27, "right_gripper_state_norm")):
+    if int(expected_dim) != FLEXIV_STATE_DIM:
+        raise ValueError(
+            f"Flexiv v2 agent_pos expected_dim must be {FLEXIV_STATE_DIM}, got {expected_dim}"
+        )
+    validate_flexiv_state_rotation6d(values, context="live agent_pos")
+    for index, key in ((16, "left_gripper_state_norm"), (33, "right_gripper_state_norm")):
         if index < values.shape[0] and not 0.0 <= float(values[index]) <= 1.0:
             raise ValueError(f"{key}={float(values[index]):.6g} outside [0, 1]")
     return values
@@ -546,6 +657,13 @@ def _cfg_get(cfg: Any, path: str, default: Any = None) -> Any:
                 return default
             raise
     return current
+
+
+def _optional_cfg_value(cfg: Any, path: str) -> Any:
+    try:
+        return _cfg_get(cfg, path)
+    except (AttributeError, KeyError, TypeError):
+        return None
 
 
 def _as_float(value: Any, *, key: str) -> float:

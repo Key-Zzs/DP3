@@ -5,21 +5,29 @@ to a DP3 replay-buffer zarr by `tools/export_lerobot_to_dp3_zarr.py`.
 
 The supported zarr contract is:
 
-- `data/state`: `(T, 28)` float32
+- `data/state`: `(T, 34)` float32 absolute rotation-6D state
 - `data/action`: `(T, 14)` float32 delta action
-- `data/point_cloud`: `(T, 1024, 3)` for `xyz`, or `(T, 1024, 6)` for `xyzrgb`
+- `data/point_cloud`: `(T, 2048, 3)` for `xyz`, or `(T, 2048, 6)` for `xyzrgb`
 - `meta/episode_ends`: cumulative episode end indices, with the last value equal to `T`
 - root attrs: `export_status=complete`, matching `expected_total_frames` and
   `converted_frames`, plus SHA-256 entries for all three training arrays
 
-State semantics are the recorded Flexiv observation vector:
+State semantics are the recorded Flexiv observation vector under
+`flexiv_abs_rot6d_v2`:
 
 - left 7 joint positions
-- left EE pose `x, y, z, rx, ry, rz`
+- left absolute TCP position `x, y, z`
+- left absolute TCP rotation-6D `c0x, c0y, c0z, c1x, c1y, c1z`
 - left normalized gripper state
 - right 7 joint positions
-- right EE pose `x, y, z, rx, ry, rz`
+- right absolute TCP position `x, y, z`
+- right absolute TCP rotation-6D `c0x, c0y, c0z, c1x, c1y, c1z`
 - right normalized gripper state
+
+The six rotation values are the first two columns of the absolute RDK
+world/base TCP rotation matrix: `rot6d = [R[:, 0], R[:, 1]]`. They are not
+matrix rows and do not use Home-relative orientation. The action remains the
+unchanged 14D left/right delta `xyz + rotvec` command plus two gripper values.
 
 Action semantics are the 14-dimensional delta command:
 
@@ -34,11 +42,11 @@ Use the `dp3` conda environment for local validation:
 
 ```bash
 conda run -n dp3 python tools/inspect_dp3_zarr.py \
-  --zarr-path /path/to/flexiv_head_xyz.zarr \
-  --expected-state-dim 28 \
+  --zarr-path /path/to/flexiv_head_xyz_state_abs_rot6d_v2.zarr \
+  --expected-state-dim 34 \
   --expected-action-dim 14 \
   --expected-pointcloud-dim 3 \
-  --expected-num-points 1024
+  --expected-num-points 2048
 ```
 
 For `xyzrgb`, change `--expected-pointcloud-dim 6`.
@@ -46,6 +54,24 @@ For `xyzrgb`, change `--expected-pointcloud-dim 6`.
 The exporter writes to a hidden temporary sibling and only commits the final
 zarr after every frame and checksum passes. The inspector and the training
 dataset both reject incomplete metadata or checksum mismatches.
+
+The exporter also records `state_names`, `action_names`,
+`state_schema=flexiv_abs_rot6d_v2`, `rotation6d_convention=matrix_columns_0_1`,
+`action_rotation_representation=rotvec`, source FPS, and source/derived state
+SHA-256 provenance. A recognized legacy 28D absolute-rotvec Flexiv dataset can
+be converted into a new `*_state_abs_rot6d_v2.zarr` with:
+
+```bash
+conda run -n dp3 python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path /absolute/path/to/legacy_lerobot \
+  --allow-legacy-state-conversion \
+  --target-state-schema flexiv_abs_rot6d_v2 \
+  --output-zarr /absolute/path/to/flexiv_state_abs_rot6d_v2.zarr
+```
+
+The converter requires exact legacy Flexiv names/order; unknown 28D data is
+rejected. It never overwrites a v1 Zarr. Existing v1 checkpoints are not
+compatible with the v2 runtime and must be retrained.
 
 ## Configure Training
 
@@ -64,7 +90,7 @@ launcher:
 algorithm: simple_dp3
 task:
   dataset:
-    zarr_path: /absolute/path/to/flexiv_head_xyz.zarr
+    zarr_path: /absolute/path/to/flexiv_head_xyz_state_abs_rot6d_v2.zarr
     max_train_episodes: 90
 
 training:

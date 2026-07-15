@@ -109,10 +109,27 @@ def _make_dataset(tmp_path: Path, *, layout: str, name: str = "dataset") -> Synt
             spec["video_key"]: {"shape": [H, W, 3]}
             for spec in exporter.CAMERA_SPECS.values()
         },
+        "robot_state_schema": exporter.build_flexiv_state_schema(),
+    }
+    info["features"][exporter.STATE_COLUMN] = {
+        "dtype": "float32",
+        "shape": [exporter.STATE_DIM],
+        "names": list(exporter.STATE_FIELD_NAMES),
+    }
+    info["features"][exporter.ACTION_COLUMN] = {
+        "dtype": "float32",
+        "shape": [exporter.ACTION_DIM],
+        "names": list(exporter.ACTION_FIELD_NAMES),
     }
     _write_json(root / "meta/info.json", info)
 
-    state = np.arange(T * exporter.STATE_DIM, dtype=np.float32).reshape(T, exporter.STATE_DIM)
+    state = np.zeros((T, exporter.STATE_DIM), dtype=np.float32)
+    state[:, :7] = np.arange(T * 7, dtype=np.float32).reshape(T, 7)
+    state[:, 17:24] = np.arange(T * 7, dtype=np.float32).reshape(T, 7)
+    state[:, 10:16] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    state[:, 27:33] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    state[:, 16] = 0.5
+    state[:, 33] = 0.5
     action = np.arange(T * exporter.ACTION_DIM, dtype=np.float32).reshape(T, exporter.ACTION_DIM)
     index = np.arange(T, dtype=np.int64)
     episode_index = np.asarray([0, 0, 1, 1], dtype=np.int64)
@@ -567,6 +584,16 @@ def test_zarr_and_parquet_export_equivalence_and_max_frames(tmp_path) -> None:
     assert zarr_root.attrs["source_sidecar_schema_name"] == source_api.RAW_SCHEMA_NAME
     assert len(zarr_root.attrs["source_sidecar_manifest_sha256"]) == 64
     assert zarr_root.attrs["raw_depth_scale_m_per_unit"] == 0.001
+    assert zarr_root.attrs["state_schema"] == "flexiv_abs_rot6d_v2"
+    assert zarr_root.attrs["state_dim"] == 34
+    assert zarr_root.attrs["action_dim"] == 14
+    assert zarr_root.attrs["rotation6d_convention"] == "matrix_columns_0_1"
+    assert zarr_root.attrs["rotation6d_order"] == ["c0x", "c0y", "c0z", "c1x", "c1y", "c1z"]
+    assert zarr_root.attrs["action_rotation_representation"] == "rotvec"
+    assert zarr_root.attrs["source_state_schema"] == "flexiv_abs_rot6d_v2"
+    assert zarr_root.attrs["state_transform"] == "passthrough_v2"
+    assert len(zarr_root.attrs["raw_source_state_sha256"]) == 64
+    assert len(zarr_root.attrs["derived_state_sha256"]) == 64
     assert "left_ir" not in zarr_root["data"] and "right_ir" not in zarr_root["data"]
     assert exporter.verify_dp3_zarr(zarr_output) == zarr_root.attrs["integrity"]
 

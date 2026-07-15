@@ -8,7 +8,7 @@ shape_meta: &shape_meta
       shape: [2048, 6]
       type: point_cloud
     agent_pos:
-      shape: [28]
+      shape: [34]
       type: low_dim
   action:
     shape: [14]
@@ -17,7 +17,7 @@ env_runner: null
 
 dataset:
   _target_: diffusion_policy_3d.dataset.flexiv_dual_arm_dataset.FlexivDualArmDataset
-  zarr_path: data/flexiv_dual_arm_head_xyzrgb.zarr
+  zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260713_v05_head_xyzrgb_state_abs_rot6d_v2.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
@@ -25,16 +25,20 @@ dataset:
   val_ratio: 0.02
   max_train_episodes: 90
   task_name: ${task_name}
-  expected_state_dim: 28
+  expected_state_dim: 34
   expected_action_dim: 14
   expected_pointcloud_dim: 6
   expected_num_points: 2048
-  normalizer_schema: flexiv_physical_v1
+  normalizer_schema: flexiv_abs_rot6d_v2
+  state_schema: flexiv_abs_rot6d_v2
+  state_rotation_representation: rotation_6d
+  state_rotation_reference: absolute_rdk_world_base
+  rotation6d_convention: matrix_columns_0_1
+  action_rotation_representation: rotvec
   clip_actions_to_execution_limits: true
   action_xyz_limit: 0.02
   action_rotation_limit: 0.04
   state_joint_range_floor: 0.20
   state_ee_position_range_floor: 0.10
-  state_ee_rotation_range_floor: 0.20
   normalizer_quantile_low: 0.005
   normalizer_quantile_high: 0.995

@@ -84,7 +84,7 @@ export behavior.
 If `--output-zarr` is omitted, the exporter writes to:
 
 ```text
-~/.cache/dp3_zarr/<lerobot_repo_id>_<camera>_<pointcloud-mode>.zarr
+~/.cache/dp3_zarr/<lerobot_repo_id>_<camera>_<pointcloud-mode>_state_abs_rot6d_v2.zarr
 ```
 
 The script first reads `repo_id` from `meta/info.json`. If the local dataset
@@ -95,7 +95,7 @@ filename characters in the repo id are replaced with `_`.
 For the example dataset below, the default `xyz` output is:
 
 ```text
-~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
+~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz_state_abs_rot6d_v2.zarr
 ```
 
 Pass `--output-zarr` only when you need to override this location.
@@ -142,11 +142,26 @@ final `.zarr` path appears only after `export_status=complete` and matching
 `expected_total_frames` / `converted_frames` metadata have been written. An
 interrupted export therefore cannot be mistaken for a complete training set.
 
+To reuse a recognized legacy Flexiv recording, require the explicit converter:
+
+```bash
+python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path /absolute/path/to/legacy_lerobot \
+  --allow-legacy-state-conversion \
+  --target-state-schema flexiv_abs_rot6d_v2 \
+  --output-zarr /absolute/path/to/legacy_state_abs_rot6d_v2.zarr
+```
+
+The exporter accepts legacy data only when its exact 28D absolute-rotvec names
+and action names match the supported Flexiv v1 contract. Unknown 28D data and
+metadata conflicts fail fast; the old Zarr and old checkpoint are never
+silently reused.
+
 ## Inspect zarr
 
 ```bash
 python tools/inspect_dp3_zarr.py \
-  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr
+  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz_state_abs_rot6d_v2.zarr
 ```
 
 The inspector verifies the completion metadata and stored SHA-256 checksums,
@@ -170,7 +185,7 @@ Visualize one frame from the zarr root:
 
 ```bash
 python visualizer/visualizer/visualize_zarr_pointcloud.py \
-  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr \
+  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz_state_abs_rot6d_v2.zarr \
   --frame 0
 ```
 
@@ -178,7 +193,7 @@ Visualize one frame from the direct point-cloud array:
 
 ```bash
 python visualizer/visualizer/visualize_zarr_pointcloud.py \
-  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz.zarr/data/point_cloud \
+  --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz_state_abs_rot6d_v2.zarr/data/point_cloud \
   --frame 0
 ```
 
@@ -214,7 +229,7 @@ RGB-D frame:
 
 ```bash
 python tools/debug_zarr_pointcloud_stages.py \
-  --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
+  --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb_state_abs_rot6d_v2.zarr \
   --frame-index 0
 ```
 
@@ -224,7 +239,7 @@ on disk has changed. To test the currently edited config, pass it explicitly:
 
 ```bash
 python tools/debug_zarr_pointcloud_stages.py \
-  --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb.zarr \
+  --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb_state_abs_rot6d_v2.zarr \
   --frame-index 0 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml
 ```
@@ -250,7 +265,7 @@ GUI.
 The exported zarr has:
 
 ```text
-data/state       (T, 28) float32
+data/state       (T, 34) float32
 data/action      (T, 14) float32
 data/point_cloud (T, N, 3) float32 for xyz
 data/point_cloud (T, N, 6) float32 for xyzrgb
@@ -265,6 +280,24 @@ in root attributes.
 
 In the current DP3 dataset code, `data/state` is loaded as
 `obs["agent_pos"]`, and `data/point_cloud` is loaded as `obs["point_cloud"]`.
+
+The Flexiv real-task state contract is `flexiv_abs_rot6d_v2`: 34 values in the
+recorded order of seven joints, absolute TCP `xyz`, six absolute rotation-6D
+values, and the normalized gripper state for each arm. Rotation-6D is
+`[R[:, 0], R[:, 1]]`, i.e. the first two columns of the absolute RDK world/base
+TCP rotation matrix; it is not the first two rows and does not depend on Home,
+Quest, or camera reference frames. The action contract remains exactly 14
+values: left/right delta `xyz`, left/right delta rotvec, then the two gripper
+commands.
+
+The exporter validates exact LeRobot state/action names and persisted schema
+metadata. A recognized legacy Flexiv v1 28D absolute-rotvec dataset can be
+converted offline with the explicit `--allow-legacy-state-conversion` flag;
+the converter uses `Rotation.from_rotvec(...).as_matrix()` and the same two
+matrix columns, so rotvec sign jumps near pi do not propagate. Unknown 28D
+data is rejected, and the output name includes `state_abs_rot6d_v2` so it
+cannot be confused with the old Zarr. Existing v1 checkpoints are incompatible
+with this runtime and require retraining.
 
 The repository already provides real-task YAMLs for XYZ and XYZRGB. The unified
 training config derives point-cloud color usage and encoder input channels from
@@ -287,7 +320,7 @@ launcher:
 algorithm: simple_dp3  # simple_dp3 or dp3
 task:
   dataset:
-    zarr_path: /absolute/path/to/flexiv_head_xyz.zarr
+    zarr_path: /absolute/path/to/flexiv_head_xyz_state_abs_rot6d_v2.zarr
     max_train_episodes: 90
 
 training:
@@ -298,13 +331,16 @@ logging:
   mode: online  # online, offline, or disabled
 ```
 
-The Flexiv dataset uses the `flexiv_physical_v1` normalization contract. It
+The Flexiv dataset uses the `flexiv_abs_rot6d_v2` normalization contract. It
 replays the collection adapter's `0.02 m` translation and `0.04 rad` rotation
 norm limits in memory (the source zarr is not modified), applies symmetric
 physical action scales to both arms, maps both grippers through `[0,1]`, and
-uses robust state quantiles with per-type range floors. Training prints a
-`[FlexivNormalizer]` audit line; do not deploy a checkpoint that lacks this
-schema. Changing any of these normalizer settings requires training a new
+uses robust state quantiles with range floors only for joints and absolute
+`xyz`. The twelve dimensionless rotation-6D components always use fixed
+`scale=1, offset=0`; they are never stretched by a low-variance quantile or a
+radian floor. Training prints a `[FlexivNormalizer]` audit line; do not deploy
+a checkpoint that lacks the v2 schema, fixed rotation-6D scales, and contract
+metadata. Changing any of these normalizer settings requires training a new
 checkpoint rather than resuming an older run.
 
 `launcher.gpu_id` selects the physical GPU through `CUDA_VISIBLE_DEVICES`; keep

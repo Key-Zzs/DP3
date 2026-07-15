@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,17 @@ def _calibration() -> dict:
     }
 
 
+def _v2_state(frames: int) -> np.ndarray:
+    state = np.zeros((frames, exporter.STATE_DIM), dtype=np.float32)
+    state[:, :7] = np.arange(frames * 7, dtype=np.float32).reshape(frames, 7)
+    state[:, 17:24] = np.arange(frames * 7, dtype=np.float32).reshape(frames, 7)
+    state[:, 10:16] = np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    state[:, 27:33] = np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    state[:, 16] = 0.5
+    state[:, 33] = 0.5
+    return state
+
+
 def test_build_pointcloud_builder_config_xyz() -> None:
     config = exporter.build_pointcloud_builder_config(
         _calibration(),
@@ -88,6 +100,125 @@ def test_build_pointcloud_builder_config_xyzrgb() -> None:
     assert config["pointcloud"]["rgb_sampling"] == "nearest"
     assert config["camera"]["depth_to_color_extrinsics"]["translation"] == [0.015, 0.0, 0.0]
     assert config["sampling"]["num_points"] == 512
+
+
+def test_rotation6d_identity_and_known_column_convention() -> None:
+    np.testing.assert_array_equal(
+        exporter.rotation_matrix_to_rot6d(np.eye(3)),
+        np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32),
+    )
+    rotation = Rotation.from_euler("zyx", [0.4, -0.2, 0.7])
+    np.testing.assert_allclose(
+        exporter.rotation_matrix_to_rot6d(rotation.as_matrix()),
+        np.concatenate((rotation.as_matrix()[:, 0], rotation.as_matrix()[:, 1])),
+        atol=1e-7,
+    )
+
+
+def test_rotation6d_x_y_z_known_rotations_use_matrix_columns() -> None:
+    expected = {
+        "x": [1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "y": [0.0, 0.0, -1.0, 0.0, 1.0, 0.0],
+        "z": [0.0, 1.0, 0.0, -1.0, 0.0, 0.0],
+    }
+    for axis, values in expected.items():
+        np.testing.assert_allclose(
+            exporter.rotation_matrix_to_rot6d(
+                Rotation.from_euler(axis, np.pi / 2.0).as_matrix()
+            ),
+            np.asarray(values, dtype=np.float32),
+            atol=1e-7,
+        )
+
+
+def test_rotation6d_quaternion_sign_and_pi_crossing_are_continuous() -> None:
+    rotation = Rotation.from_euler("xyz", [0.3, -0.7, 1.2])
+    quat = rotation.as_quat()
+    matrix_a = Rotation.from_quat(quat).as_matrix()
+    matrix_b = Rotation.from_quat(-quat).as_matrix()
+    np.testing.assert_allclose(
+        exporter.rotation_matrix_to_rot6d(matrix_a),
+        exporter.rotation_matrix_to_rot6d(matrix_b),
+        atol=1e-7,
+    )
+    axis = np.asarray([0.3, -0.4, 0.5], dtype=float)
+    axis /= np.linalg.norm(axis)
+    before = Rotation.from_rotvec(axis * (np.pi - 1e-7)).as_matrix()
+    after = Rotation.from_rotvec(axis * (np.pi + 1e-7)).as_matrix()
+    assert np.linalg.norm(
+        exporter.rotation_matrix_to_rot6d(before)
+        - exporter.rotation_matrix_to_rot6d(after)
+    ) < 1e-5
+
+
+def _schema_info(state_names: list[str], state_dim: int) -> dict:
+    return {
+        "features": {
+            exporter.STATE_COLUMN: {
+                "dtype": "float32",
+                "shape": [state_dim],
+                "names": state_names,
+            },
+            exporter.ACTION_COLUMN: {
+                "dtype": "float32",
+                "shape": [exporter.ACTION_DIM],
+                "names": list(exporter.ACTION_FIELD_NAMES),
+            },
+        }
+    }
+
+
+def test_legacy_abs_rotvec_to_v2_conversion_is_explicit_and_exact() -> None:
+    legacy = np.zeros(exporter.FLEXIV_LEGACY_STATE_DIM, dtype=np.float32)
+    legacy[:7] = np.arange(7, dtype=np.float32)
+    legacy[7:10] = [0.1, 0.2, 0.3]
+    legacy[10:13] = [0.0, 0.0, np.pi - 1e-7]
+    legacy[13] = 0.25
+    legacy[14:21] = np.arange(7, dtype=np.float32) + 10
+    legacy[21:24] = [0.4, 0.5, 0.6]
+    legacy[24:27] = [0.0, 0.0, -np.pi + 1e-7]
+    legacy[27] = 0.75
+    converted = exporter.convert_legacy_abs_rotvec_to_v2(legacy)
+    assert converted.shape == (exporter.STATE_DIM,)
+    np.testing.assert_allclose(converted[:7], legacy[:7])
+    np.testing.assert_allclose(converted[7:10], legacy[7:10])
+    np.testing.assert_allclose(converted[16], legacy[13])
+    np.testing.assert_allclose(converted[17:24], legacy[14:21])
+    np.testing.assert_allclose(converted[24:27], legacy[21:24])
+    np.testing.assert_allclose(converted[33], legacy[27])
+    expected_left = Rotation.from_rotvec(legacy[10:13]).as_matrix()
+    expected_right = Rotation.from_rotvec(legacy[24:27]).as_matrix()
+    np.testing.assert_allclose(
+        converted[10:16], np.concatenate((expected_left[:, 0], expected_left[:, 1])), atol=1e-6
+    )
+    np.testing.assert_allclose(
+        converted[27:33], np.concatenate((expected_right[:, 0], expected_right[:, 1])), atol=1e-6
+    )
+
+
+def test_source_schema_detection_rejects_unknown_28d_and_requires_legacy_flag() -> None:
+    unknown = _schema_info([f"unknown_{i}" for i in range(28)], 28)
+    with pytest.raises(ValueError, match="Unknown Flexiv state schema"):
+        exporter.detect_source_state_contract(unknown)
+
+    legacy = _schema_info(list(exporter.LEGACY_STATE_FIELD_NAMES), 28)
+    with pytest.raises(ValueError, match="legacy.*conversion.*explicitly enabled"):
+        exporter.detect_source_state_contract(legacy)
+    detected = exporter.detect_source_state_contract(
+        legacy,
+        allow_legacy_conversion=True,
+    )
+    assert detected.schema == exporter.FLEXIV_LEGACY_STATE_SCHEMA
+    assert detected.transform == exporter.LEGACY_CONVERTER_NAME
+
+
+def test_source_schema_detection_accepts_exact_v2_names() -> None:
+    info = _schema_info(list(exporter.STATE_FIELD_NAMES), exporter.STATE_DIM)
+    detected = exporter.detect_source_state_contract(info)
+    assert detected.schema == exporter.TARGET_STATE_SCHEMA
+    assert detected.transform == "passthrough_v2"
+    source = _v2_state(1)[0]
+    np.testing.assert_array_equal(exporter.convert_source_state(source, detected), source)
 
 
 def test_compute_episode_ends_from_episode_rows_and_max_frames() -> None:
@@ -117,7 +248,7 @@ def test_default_output_zarr_path_uses_sanitized_repo_id(tmp_path) -> None:
         pointcloud_mode="xyzrgb",
         output_root=tmp_path,
     )
-    assert output == tmp_path / "owner_my_dataset_head_xyzrgb.zarr"
+    assert output == tmp_path / "owner_my_dataset_head_xyzrgb_state_abs_rot6d_v2.zarr"
 
 
 def test_default_output_zarr_path_falls_back_to_lerobot_cache_relative(tmp_path) -> None:
@@ -129,14 +260,14 @@ def test_default_output_zarr_path_falls_back_to_lerobot_cache_relative(tmp_path)
         pointcloud_mode="xyz",
         output_root=tmp_path,
     )
-    assert output == tmp_path / "org_dataset_left_wrist_xyz.zarr"
+    assert output == tmp_path / "org_dataset_left_wrist_xyz_state_abs_rot6d_v2.zarr"
 
 
 def test_write_dp3_zarr_xyz_and_overwrite(tmp_path) -> None:
     zarr = pytest.importorskip("zarr")
     assert zarr is not None
     output = tmp_path / "mock_xyz.zarr"
-    state = np.zeros((2, 28), dtype=np.float32)
+    state = _v2_state(2)
     action = np.zeros((2, 14), dtype=np.float32)
     point_cloud = np.zeros((2, 8, 3), dtype=np.float32)
     exporter.write_dp3_zarr(
@@ -149,8 +280,28 @@ def test_write_dp3_zarr_xyz_and_overwrite(tmp_path) -> None:
         overwrite=False,
     )
     root = zarr.open(str(output), mode="r")
+    assert root["data"]["state"].shape == (2, exporter.STATE_DIM)
+    assert root["data"]["action"].shape == (2, exporter.ACTION_DIM)
     assert root["data"]["point_cloud"].shape == (2, 8, 3)
     assert root.attrs["export_status"] == "complete"
+    assert root.attrs["state_schema"] == exporter.TARGET_STATE_SCHEMA
+    assert root.attrs["rotation6d_convention"] == "matrix_columns_0_1"
+    assert root.attrs["action_rotation_representation"] == "rotvec"
+    assert root.attrs["state_dim"] == 34
+    assert root.attrs["action_dim"] == 14
+    assert root.attrs["state_names"] == list(exporter.STATE_FIELD_NAMES)
+    assert root.attrs["action_names"] == list(exporter.ACTION_FIELD_NAMES)
+    assert root.attrs["state_rotation_representation"] == "rotation_6d"
+    assert root.attrs["state_rotation_reference"] == "absolute_rdk_world_base"
+    assert root.attrs["rotation6d_order"] == ["c0x", "c0y", "c0z", "c1x", "c1y", "c1z"]
+    assert root.attrs["source_state_schema"] == exporter.TARGET_STATE_SCHEMA
+    assert root.attrs["source_state_names"] == list(exporter.STATE_FIELD_NAMES)
+    assert root.attrs["state_transform"] == "passthrough_v2"
+    assert "source_fps" in root.attrs
+    assert len(root.attrs["raw_source_state_sha256"]) == 64
+    assert len(root.attrs["derived_state_sha256"]) == 64
+    assert root.attrs["integrity"]["raw_source_state"] == root.attrs["raw_source_state_sha256"]
+    assert root.attrs["integrity"]["derived_state"] == root.attrs["derived_state_sha256"]
     assert root.attrs["converted_frames"] == 2
     assert exporter.verify_dp3_zarr(output)["state"] == root.attrs["integrity"]["state"]
     with pytest.raises(FileExistsError):
@@ -180,7 +331,7 @@ def test_write_dp3_zarr_xyzrgb(tmp_path) -> None:
     output = tmp_path / "mock_xyzrgb.zarr"
     exporter.write_dp3_zarr(
         output,
-        state=np.zeros((3, 28), dtype=np.float32),
+        state=_v2_state(3),
         action=np.zeros((3, 14), dtype=np.float32),
         point_cloud=np.zeros((3, 4, 6), dtype=np.float32),
         episode_ends=np.asarray([1, 3], dtype=np.int64),
@@ -191,6 +342,23 @@ def test_write_dp3_zarr_xyzrgb(tmp_path) -> None:
     assert root["data"]["point_cloud"].shape == (3, 4, 6)
     assert root["meta"]["episode_ends"][:].tolist() == [1, 3]
     assert exporter.verify_dp3_zarr(output) == root.attrs["integrity"]
+
+
+def test_write_dp3_zarr_rejects_conflicting_source_metadata(tmp_path) -> None:
+    output = tmp_path / "conflicting_source.zarr"
+    with pytest.raises(ValueError, match="source metadata state_transform"):
+        exporter.write_dp3_zarr(
+            output,
+            state=_v2_state(1),
+            action=np.zeros((1, 14), dtype=np.float32),
+            point_cloud=np.zeros((1, 8, 3), dtype=np.float32),
+            episode_ends=np.asarray([1], dtype=np.int64),
+            attrs={
+                "source_state_schema": exporter.FLEXIV_LEGACY_STATE_SCHEMA,
+                "state_transform": "passthrough_v2",
+            },
+        )
+    assert not output.exists()
 
 
 def test_verify_rejects_incomplete_export(tmp_path) -> None:
@@ -208,7 +376,7 @@ def test_verify_rejects_modified_array(tmp_path) -> None:
     output = tmp_path / "modified.zarr"
     exporter.write_dp3_zarr(
         output,
-        state=np.zeros((2, 28), dtype=np.float32),
+        state=_v2_state(2),
         action=np.zeros((2, 14), dtype=np.float32),
         point_cloud=np.zeros((2, 4, 3), dtype=np.float32),
         episode_ends=np.asarray([2], dtype=np.int64),
