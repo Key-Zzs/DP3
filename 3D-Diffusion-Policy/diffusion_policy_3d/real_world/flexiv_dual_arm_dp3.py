@@ -43,6 +43,13 @@ FLEXIV_STATE_INDEX_GROUPS = {
     "grippers": STATE_GRIPPER_INDICES.copy(),
 }
 
+FFS_BACKEND_NAMES = (
+    "pytorch",
+    "tensorrt_single",
+    "tensorrt_two_stage",
+    "tensorrt_plugin",
+)
+
 
 @dataclass(frozen=True)
 class PolicyContract:
@@ -56,6 +63,118 @@ class PolicyContract:
     state_rotation_reference: str | None = None
     rotation6d_convention: str | None = None
     action_rotation_representation: str | None = None
+
+
+@dataclass(frozen=True)
+class PointCloudRuntimeContract:
+    """The live observation contract derived from one PointCloudBuilder."""
+
+    depth_source: str
+    output_format: str
+    use_rgb: bool
+    num_points: int
+    camera_name: str
+    ffs_backend: str | None = None
+    ffs_left_key: str | None = None
+    ffs_right_key: str | None = None
+    ffs_width: int | None = None
+    ffs_height: int | None = None
+    ffs_artifact_id: str | None = None
+    ffs_config: Any | None = None
+
+    @property
+    def pointcloud_dim(self) -> int:
+        return 6 if self.output_format == "xyzrgb" else 3
+
+
+def pointcloud_runtime_contract_from_builder(builder: Any) -> PointCloudRuntimeContract:
+    """Read all live camera/depth/point-cloud choices from a parsed builder."""
+
+    config = getattr(builder, "config", None)
+    if config is None:
+        raise ValueError("PointCloudBuilder must expose its parsed config")
+    camera = getattr(config, "camera", None)
+    pointcloud = getattr(config, "pointcloud", None)
+    sampling = getattr(config, "sampling", None)
+    depth_source = getattr(config, "depth_source", None)
+    if camera is None or pointcloud is None or sampling is None or depth_source is None:
+        raise ValueError(
+            "PointCloudBuilder config must expose camera, pointcloud, sampling, and depth_source"
+        )
+
+    output_format = str(getattr(pointcloud, "output_format", "")).strip().lower()
+    if output_format not in {"xyz", "xyzrgb"}:
+        raise ValueError(
+            "PointCloudBuilder pointcloud.output_format must be 'xyz' or 'xyzrgb', "
+            f"got {output_format!r}"
+        )
+    use_rgb = bool(getattr(pointcloud, "use_rgb", False))
+    if use_rgb != (output_format == "xyzrgb"):
+        raise ValueError(
+            "PointCloudBuilder pointcloud.use_rgb must agree with "
+            f"pointcloud.output_format={output_format!r}"
+        )
+    if not bool(getattr(sampling, "enabled", False)):
+        raise ValueError(
+            "Formal Flexiv inference requires PointCloudBuilder sampling.enabled=true"
+        )
+    num_points = _positive_int(
+        getattr(sampling, "num_points", None),
+        label="PointCloudBuilder sampling.num_points",
+    )
+
+    mode = str(getattr(depth_source, "mode", "frame")).strip().lower()
+    camera_name = str(getattr(camera, "name", "camera")).strip() or "camera"
+    if mode == "frame":
+        return PointCloudRuntimeContract(
+            depth_source="native_depth",
+            output_format=output_format,
+            use_rgb=use_rgb,
+            num_points=num_points,
+            camera_name=camera_name,
+        )
+    if mode != "ffs_stereo":
+        raise ValueError(
+            "PointCloudBuilder depth_source.mode must be 'frame' or 'ffs_stereo', "
+            f"got {mode!r}"
+        )
+
+    ffs = getattr(depth_source, "ffs", None)
+    if ffs is None:
+        raise ValueError("PointCloudBuilder depth_source.ffs is required for ffs_stereo")
+    backend = str(getattr(ffs, "backend", "")).strip().lower()
+    if backend not in FFS_BACKEND_NAMES:
+        raise ValueError(
+            "PointCloudBuilder depth_source.ffs.backend must be one of "
+            f"{FFS_BACKEND_NAMES}, got {backend!r}"
+        )
+    left_key = str(getattr(ffs, "left_key", "")).strip()
+    right_key = str(getattr(ffs, "right_key", "")).strip()
+    if not left_key or not right_key:
+        raise ValueError("PointCloudBuilder FFS left_key and right_key must be non-empty")
+    ffs_width = _positive_int(getattr(ffs, "width", None), label="FFS input width")
+    ffs_height = _positive_int(getattr(ffs, "height", None), label="FFS input height")
+    if (ffs_height, ffs_width) != (480, 640):
+        raise ValueError(
+            "Formal FFS inference requires input height=480,width=640; "
+            f"got height={ffs_height}, width={ffs_width}"
+        )
+    artifact_id = getattr(ffs, "artifact_id", None)
+    artifact_id = None if artifact_id is None else str(artifact_id).strip() or None
+    return PointCloudRuntimeContract(
+        depth_source="ffs_stereo",
+        output_format=output_format,
+        use_rgb=use_rgb,
+        num_points=num_points,
+        camera_name=camera_name,
+        ffs_backend=backend,
+        ffs_left_key=left_key,
+        ffs_right_key=right_key,
+        ffs_width=ffs_width,
+        ffs_height=ffs_height,
+        ffs_artifact_id=artifact_id,
+        ffs_config=ffs,
+    )
 
 
 @dataclass(frozen=True)
@@ -470,8 +589,26 @@ def build_pointcloud_frame_from_observation(
     camera_name: str = "head_rgb",
     rgb_key: str | None = None,
     depth_key: str | None = None,
+    builder: Any | None = None,
+    runtime_contract: PointCloudRuntimeContract | None = None,
 ) -> dict[str, Any]:
-    """Extract a PointCloudBuilder live frame from a Flexiv observation dict."""
+    """Extract one native-depth or FFS frame from a Flexiv observation dict.
+
+    The FFS branch intentionally never reads or inserts native ``depth``.  The
+    adapter publishes stable sidecar names, while the Builder's configured
+    ``left_key``/``right_key`` decide the keys passed to its estimator.
+    """
+
+    contract = runtime_contract
+    if contract is None and builder is not None:
+        contract = pointcloud_runtime_contract_from_builder(builder)
+    if contract is not None and contract.depth_source == "ffs_stereo":
+        return _build_ffs_pointcloud_frame_from_observation(
+            observation,
+            camera_name=camera_name,
+            rgb_key=rgb_key,
+            contract=contract,
+        )
 
     base_name = _camera_base_name(camera_name)
     resolved_rgb_key = rgb_key or _first_present_key(
@@ -484,25 +621,283 @@ def build_pointcloud_frame_from_observation(
     )
     if resolved_depth_key is None:
         raise KeyError(
-            "Missing depth frame. Enable `save_depth_sidecar` on the Flexiv robot "
+            f"Missing depth frame for camera {camera_name!r} with depth_source='native_depth'. "
+            "Enable `save_depth_sidecar` on the Flexiv robot "
             f"config and expected one of sidecar.{base_name}_depth or sidecar.{camera_name}_depth."
         )
 
     frame: dict[str, Any] = {"depth": observation[resolved_depth_key]}
     if resolved_rgb_key is not None:
         frame["rgb"] = observation[resolved_rgb_key]
+    if contract is not None and contract.output_format == "xyzrgb" and resolved_rgb_key is None:
+        raise KeyError(
+            f"Missing RGB field for camera {camera_name!r} with depth_source='native_depth' "
+            "and pointcloud output_format='xyzrgb'"
+        )
+    _copy_camera_frame_metadata(frame, observation, base_name=base_name, required=False)
+    frame["depth_source"] = "native_depth"
+    return frame
+
+
+def _build_ffs_pointcloud_frame_from_observation(
+    observation: Mapping[str, Any],
+    *,
+    camera_name: str,
+    rgb_key: str | None,
+    contract: PointCloudRuntimeContract,
+) -> dict[str, Any]:
+    """Build the exact stereo-IR frame required by PointCloudBuilder."""
+
+    base_name = _camera_base_name(camera_name)
+    left_key = str(contract.ffs_left_key)
+    right_key = str(contract.ffs_right_key)
+    left_observation_key = _resolve_ffs_observation_key(
+        observation,
+        configured_key=left_key,
+        camera_name=camera_name,
+        base_name=base_name,
+        side="left",
+    )
+    right_observation_key = _resolve_ffs_observation_key(
+        observation,
+        configured_key=right_key,
+        camera_name=camera_name,
+        base_name=base_name,
+        side="right",
+    )
+    expected_shape = (int(contract.ffs_height), int(contract.ffs_width))
+    left = _validate_live_ir(
+        observation[left_observation_key],
+        field=left_observation_key,
+        camera_name=camera_name,
+        expected_shape=expected_shape,
+    )
+    right = _validate_live_ir(
+        observation[right_observation_key],
+        field=right_observation_key,
+        camera_name=camera_name,
+        expected_shape=expected_shape,
+    )
+    if left.shape != right.shape:
+        raise ValueError(
+            f"FFS stereo IR shape mismatch for camera {camera_name!r} with "
+            f"depth_source='ffs_stereo': left={left.shape}, right={right.shape}"
+        )
+
     timestamp_key = f"{base_name}_rgbd_timestamp"
+    wall_time_key = f"{base_name}_rgbd_wall_time"
+    if timestamp_key not in observation:
+        raise KeyError(
+            f"Missing {timestamp_key!r} for camera {camera_name!r} with "
+            "depth_source='ffs_stereo'; stereo freshness cannot be checked"
+        )
+    if wall_time_key not in observation:
+        raise KeyError(
+            f"Missing {wall_time_key!r} for camera {camera_name!r} with "
+            "depth_source='ffs_stereo'; stereo frame age cannot be checked"
+        )
+    timestamp = _as_float(observation[timestamp_key], key=timestamp_key)
+    wall_time = _as_float(observation[wall_time_key], key=wall_time_key)
+    if "global_frame_index" not in observation:
+        raise KeyError(
+            f"Missing 'global_frame_index' for camera {camera_name!r} with "
+            "depth_source='ffs_stereo'; stereo frame reuse cannot be checked"
+        )
+    global_frame_index = _as_non_negative_int(
+        observation["global_frame_index"],
+        key="global_frame_index",
+    )
+    frame: dict[str, Any] = {
+        left_key: left,
+        right_key: right,
+        "timestamp": timestamp,
+        "wall_time": wall_time,
+        "global_frame_index": global_frame_index,
+        "depth_source": "ffs_stereo",
+        "ffs_backend": contract.ffs_backend,
+        "ffs_left_key": left_key,
+        "ffs_right_key": right_key,
+    }
+    _copy_camera_frame_metadata(frame, observation, base_name=base_name, required=False)
+    _validate_ffs_pair_metadata(
+        frame,
+        observation,
+        base_name=base_name,
+        camera_name=camera_name,
+        common_timestamp=timestamp,
+    )
+
+    resolved_rgb_key = rgb_key or _first_present_key(
+        observation,
+        (camera_name, f"{base_name}_rgb", f"{base_name}_image", base_name),
+    )
+    if resolved_rgb_key is not None:
+        frame["rgb"] = observation[resolved_rgb_key]
+    if contract.output_format == "xyzrgb" and resolved_rgb_key is None:
+        raise KeyError(
+            f"Missing RGB field for camera {camera_name!r} with depth_source='ffs_stereo' "
+            "and pointcloud output_format='xyzrgb'; FFS does not fall back to native depth"
+        )
+    return frame
+
+
+def _resolve_ffs_observation_key(
+    observation: Mapping[str, Any],
+    *,
+    configured_key: str,
+    camera_name: str,
+    base_name: str,
+    side: str,
+) -> str:
+    """Resolve a Builder key while retaining the adapter's sidecar names."""
+
+    candidates: list[str] = [configured_key]
+    candidates.extend(
+        (
+            f"sidecar.{base_name}_{configured_key}",
+            f"{base_name}_{configured_key}",
+            f"{camera_name}_{configured_key}",
+            f"sidecar.{base_name}_{side}_ir",
+            f"{base_name}_{side}_ir",
+            f"{camera_name}_{side}_ir",
+            f"{side}_ir",
+        )
+    )
+    for candidate in dict.fromkeys(candidates):
+        if candidate in observation:
+            return candidate
+    raise KeyError(
+        f"Missing {side} IR field for camera {camera_name!r} with "
+        "depth_source='ffs_stereo'; "
+        f"Builder {side}_key={configured_key!r}; checked {list(dict.fromkeys(candidates))!r}. "
+        "Native depth is not an FFS fallback"
+    )
+
+
+def _validate_live_ir(
+    value: Any,
+    *,
+    field: str,
+    camera_name: str,
+    expected_shape: tuple[int, int],
+) -> np.ndarray:
+    array = np.asarray(value)
+    if array.shape != expected_shape:
+        raise ValueError(
+            f"FFS stereo IR {field} shape for camera {camera_name!r} with "
+            "depth_source='ffs_stereo' "
+            f"is {array.shape}, expected {expected_shape}"
+        )
+    if array.dtype.kind not in {"b", "u", "i", "f"}:
+        raise ValueError(f"FFS {field} for camera {camera_name!r} must be numeric")
+    numeric = np.asarray(array, dtype=np.float32)
+    if not np.isfinite(numeric).all() or np.any(numeric < 0.0) or np.any(numeric > 255.0):
+        raise ValueError(
+            f"FFS {field} for camera {camera_name!r} must contain finite 0..255 pixels"
+        )
+    return array
+
+
+def _copy_camera_frame_metadata(
+    frame: dict[str, Any],
+    observation: Mapping[str, Any],
+    *,
+    base_name: str,
+    required: bool,
+) -> None:
+    timestamp_key = f"{base_name}_rgbd_timestamp"
+    wall_time_key = f"{base_name}_rgbd_wall_time"
+    frame_index_key = f"{base_name}_rgbd_frame_index"
     if timestamp_key in observation:
         frame["timestamp"] = _as_float(observation[timestamp_key], key=timestamp_key)
-    wall_time_key = f"{base_name}_rgbd_wall_time"
+    elif required:
+        raise KeyError(f"Missing {timestamp_key!r}")
     if wall_time_key in observation:
         frame["wall_time"] = _as_float(observation[wall_time_key], key=wall_time_key)
+    elif required:
+        raise KeyError(f"Missing {wall_time_key!r}")
+    if frame_index_key in observation:
+        frame["frame_index"] = _as_non_negative_int(
+            observation[frame_index_key],
+            key=frame_index_key,
+        )
     if "global_frame_index" in observation:
         frame["global_frame_index"] = _as_non_negative_int(
             observation["global_frame_index"],
             key="global_frame_index",
         )
-    return frame
+    for suffix, field_name in (
+        ("left_ir_timestamp", "left_ir_timestamp"),
+        ("right_ir_timestamp", "right_ir_timestamp"),
+        ("left_ir_frame_index", "left_ir_frame_index"),
+        ("right_ir_frame_index", "right_ir_frame_index"),
+    ):
+        key = f"{base_name}_{suffix}"
+        if key not in observation:
+            continue
+        if suffix.endswith("frame_index"):
+            frame[field_name] = _as_non_negative_int(observation[key], key=key)
+        else:
+            frame[field_name] = _as_float(observation[key], key=key)
+
+
+def _validate_ffs_pair_metadata(
+    frame: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    *,
+    base_name: str,
+    camera_name: str,
+    common_timestamp: float,
+) -> None:
+    del observation
+    left_timestamp = frame.get("left_ir_timestamp")
+    right_timestamp = frame.get("right_ir_timestamp")
+    if left_timestamp is None and right_timestamp is None:
+        raise ValueError(
+            f"FFS stereo IR timestamp metadata is required for camera {camera_name!r}: "
+            f"{base_name}_left_ir_timestamp and {base_name}_right_ir_timestamp must "
+            "identify the same frameset"
+        )
+    if (left_timestamp is None) != (right_timestamp is None):
+        raise ValueError(
+            f"FFS stereo IR timestamp metadata is incomplete for camera {camera_name!r}: "
+            f"{base_name}_left_ir_timestamp and {base_name}_right_ir_timestamp are a pair"
+        )
+    if left_timestamp is not None:
+        if not np.isclose(float(left_timestamp), float(right_timestamp), rtol=0.0, atol=1e-6):
+            raise ValueError(
+                f"FFS stereo IR timestamp mismatch for camera {camera_name!r}: "
+                f"left={left_timestamp!r}, right={right_timestamp!r}"
+            )
+        if not np.isclose(float(left_timestamp), float(common_timestamp), rtol=0.0, atol=1e-6):
+            raise ValueError(
+                f"FFS stereo IR timestamp does not match the RGB frame for camera {camera_name!r}: "
+                f"ir={left_timestamp!r}, rgb={common_timestamp!r}"
+            )
+    left_index = frame.get("left_ir_frame_index")
+    right_index = frame.get("right_ir_frame_index")
+    if left_index is None and right_index is None:
+        raise ValueError(
+            f"FFS stereo IR frame-index metadata is required for camera {camera_name!r}: "
+            f"{base_name}_left_ir_frame_index and {base_name}_right_ir_frame_index "
+            "must identify the same frameset"
+        )
+    if (left_index is None) != (right_index is None):
+        raise ValueError(
+            f"FFS stereo IR frame-index metadata is incomplete for camera {camera_name!r}: "
+            f"{base_name}_left_ir_frame_index and {base_name}_right_ir_frame_index are a pair"
+        )
+    if left_index is not None and int(left_index) != int(right_index):
+        raise ValueError(
+            f"FFS stereo IR frame-index mismatch for camera {camera_name!r}: "
+            f"left={left_index!r}, right={right_index!r}"
+        )
+    camera_index = frame.get("frame_index")
+    if left_index is not None and camera_index is not None and int(left_index) != int(camera_index):
+        raise ValueError(
+            f"FFS stereo IR frame index does not match the RGB frame for camera {camera_name!r}: "
+            f"ir={left_index!r}, rgb={camera_index!r}"
+        )
 
 
 def prepare_point_cloud(

@@ -197,10 +197,12 @@ configs are:
 - `third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml` — native/FFS + xyz
 - `third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml` — native/FFS + xyzrgb
 
-Both files keep native depth active as `depth_source.mode: frame` and contain
-all four FFS backend groups as comments. To use FFS, comment out that active
-native block and uncomment exactly one complete FFS group. Use an IR-capable
-entrypoint such as the stage-debug tools or `run_flexiv_dp3_perception_only.py`.
+The checked-in files currently select the validated FFS routes: `data_config.yaml`
+uses `tensorrt_two_stage` with `xyz`, while `data_rgb_config.yaml` uses
+`tensorrt_plugin` with `xyzrgb`. Their native-depth `depth_source.mode: frame`
+blocks remain commented. To select native depth, comment out the active FFS
+mapping and uncomment the native block. All four FFS backend groups remain in
+the canonical files so a route switch changes only the Builder YAML.
 
 The exporter resolves relative artifact paths against the original YAML
 directory before writing its output-side resolved config. Backend, artifact id,
@@ -586,6 +588,19 @@ and `robot.send_action()`; it is separate from the no-motion perception-only
 entry point above. The default
 Open3D monitor runs in a separate process at 2 Hz with capacity-one latest-frame
 queues, so visualization cannot block the control loop.
+
+The formal launcher takes the live perception contract exclusively from the
+selected PointCloudBuilder YAML. In `native_depth` mode it keeps
+`use_depth=true` and leaves IR disabled. In `ffs_stereo` mode it enables both
+IR streams and reads one coherent RGB/depth/left-IR/right-IR frameset; the
+adapter publishes `sidecar.head_left_ir`, `sidecar.head_right_ir`,
+`head_rgbd_timestamp`, `head_rgbd_frame_index`, and paired IR timestamp/frame
+index fields. The launcher remaps those canonical observation keys to the
+Builder's configured `left_key`/`right_key`, passes RGB for `xyzrgb`, and never
+passes native depth to the FFS Builder or falls back to it. Startup checks the
+backend artifacts, camera geometry, frame metadata contract, checkpoint
+point-cloud dimension (`xyz=3`, `xyzrgb=6`), and fixed point count before any
+robot connection.
 
 The default configuration runs closed-loop inference until `Ctrl+C`. The launcher
 also prints the generated JSONL path and stop-file command, so another terminal can stop it with:

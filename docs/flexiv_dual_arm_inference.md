@@ -158,6 +158,25 @@ next chunk. This matches Le-nero's DiffusionPolicy queue and the official
 `MultiStepWrapper` execution semantics. `receding` remains available for
 diagnostics but resamples after every first action.
 
+The PointCloudBuilder YAML is the only source of the live camera/depth contract.
+`depth_source.mode: frame` selects native depth, keeps the adapter camera at
+`use_depth=true`, and leaves IR disabled. `depth_source.mode: ffs_stereo`
+selects any of the four Builder backends, enables IR, and keeps RGB, left IR,
+and right IR in one RealSense frameset. The adapter publishes the canonical
+keys `sidecar.head_left_ir` and `sidecar.head_right_ir` plus
+`head_rgbd_timestamp`, `head_rgbd_frame_index`, and paired IR timestamp/frame
+index metadata. The live frame adapter maps those fields to the Builder's
+configured `left_key` and `right_key`; for `xyzrgb` it also supplies RGB. It
+deliberately omits native `depth` from an FFS Builder frame, so FFS cannot
+silently fall back to native depth.
+
+Before `robot.connect()`, startup parses the Builder contract, preflights the
+backend-specific artifact manifest/files, checks camera dimensions and FFS
+geometry, and requires exact checkpoint compatibility: `xyz` is 3 channels,
+`xyzrgb` is 6 channels, and `sampling.num_points` must match the checkpoint.
+The `--check-config` branch exercises the same native/FFS adapter feature
+contract without opening the camera or connecting the robot.
+
 ## Start Inference
 
 Review these fields in `dp3_inference_config.yaml` before starting:
@@ -203,10 +222,12 @@ is created. A positive value enables a timed upper bound for short tests.
 
 ## Live Inference Flow
 
-Every 30 Hz control cycle performs:
+Every control cycle performs:
 
-1. read live Flexiv joints, end-effector poses, gripper widths, RGB, and depth;
-2. deproject the RGB-D frame once with PointCloudBuilder;
+1. read live Flexiv joints, end-effector poses, gripper widths, and one coherent
+   camera frameset; native mode uses its depth sidecar, while FFS mode uses its
+   left/right IR pair (and RGB when configured);
+2. resolve the configured native or FFS depth source once with PointCloudBuilder;
 3. crop in the configured camera-space workspace;
 4. sample the exact 2048-point policy input;
 5. build and stack the 34D absolute rotation-6D robot-state observation;

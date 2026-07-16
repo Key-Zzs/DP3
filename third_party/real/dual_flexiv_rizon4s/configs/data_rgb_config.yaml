@@ -55,8 +55,9 @@ sampling:
   deterministic: true
   seed: 42
 
-# Active native_depth + xyzrgb configuration. PointCloudBuilder spells the
-# public native_depth mode as `depth_source.mode: frame`.
+# Optional native-depth + xyzrgb configuration. PointCloudBuilder spells the
+# public native_depth mode as `depth_source.mode: frame`; comment out the
+# active FFS mapping below and uncomment this mapping to select native depth.
 # depth_source:
 #   mode: frame
 
@@ -143,7 +144,7 @@ sampling:
 #     min_disparity_px: 0.001
 #     min_depth_m: 0.0
 #
-# 4. TensorRT plugin route:
+# 4. TensorRT plugin route (active):
 depth_source:
   mode: ffs_stereo
   ffs:

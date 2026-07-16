@@ -1909,7 +1909,24 @@ class FlexivDualArm:
         if self.config.save_rgbd_timestamps:
             obs[f"{base_name}_rgbd_timestamp"] = float(frame["timestamp"])
             obs[f"{base_name}_rgbd_wall_time"] = float(frame.get("wall_time", time.time()))
+            if frame.get("frame_index") is None:
+                raise RuntimeError(f"Camera {cam_name} did not provide a frame index.")
+            obs[f"{base_name}_rgbd_frame_index"] = int(frame["frame_index"])
             obs[f"{base_name}_rgbd_reused"] = bool(frame.get("reused", False))
+            for suffix, dtype in (
+                ("left_ir_timestamp", float),
+                ("right_ir_timestamp", float),
+                ("left_ir_frame_index", int),
+                ("right_ir_frame_index", int),
+            ):
+                if frame.get(suffix) is None:
+                    if self.config.save_ir_sidecar:
+                        raise RuntimeError(
+                            f"Camera {cam_name} did not provide {suffix} metadata "
+                            "for the FFS stereo freshness contract."
+                        )
+                    continue
+                obs[f"{base_name}_{suffix}"] = dtype(frame[suffix])
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -1979,11 +1996,28 @@ class FlexivDualArm:
                     "shape": (1,),
                     "names": None,
                 }
+                features[f"{base_name}_rgbd_frame_index"] = {
+                    "dtype": "int64",
+                    "shape": (1,),
+                    "names": None,
+                }
                 features[f"{base_name}_rgbd_reused"] = {
                     "dtype": "bool",
                     "shape": (1,),
                     "names": None,
                 }
+                if self.config.save_ir_sidecar:
+                    for suffix, dtype in (
+                        ("left_ir_timestamp", "float64"),
+                        ("right_ir_timestamp", "float64"),
+                        ("left_ir_frame_index", "int64"),
+                        ("right_ir_frame_index", "int64"),
+                    ):
+                        features[f"{base_name}_{suffix}"] = {
+                            "dtype": dtype,
+                            "shape": (1,),
+                            "names": None,
+                        }
 
         if self.config.save_rgbd_timestamps:
             features["global_frame_index"] = {"dtype": "int64", "shape": (1,), "names": None}

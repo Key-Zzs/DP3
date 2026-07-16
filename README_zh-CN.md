@@ -181,10 +181,12 @@ canonical Flexiv Builder config 为：
 - `third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml` — native/FFS + xyz
 - `third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml` — native/FFS + xyzrgb
 
-两个文件都以 `depth_source.mode: frame` active 表示 native depth，并以注释形式列出
-四个 FFS backend 完整配置。使用 FFS 时，把 active 的 native 块注释掉，再只解开一个
-完整 FFS 配置块；应使用能提供 IR 的入口，例如阶段调试脚本或
-`run_flexiv_dp3_perception_only.py`。
+当前仓库中的两个文件已经选择经过验证的 FFS 路线：`data_config.yaml` 使用
+`tensorrt_two_stage` + `xyz`，`data_rgb_config.yaml` 使用
+`tensorrt_plugin` + `xyzrgb`。两个文件中的 native-depth
+`depth_source.mode: frame` 仍保持注释。若要选择 native depth，先注释 active 的
+FFS mapping，再解开 native 块。四种 FFS backend 的完整配置仍集中在 canonical
+文件中，因此切换路线只需要改 Builder YAML。
 
 exporter 会按照原始 YAML 所在目录解析相对 artifact 路径，然后在输出旁写入
 最终 resolved config。backend、artifact id、precision、optimization level 和
@@ -528,6 +530,16 @@ bash scripts/run_flexiv_dual_arm_dp3_inference.sh
 2048 点采样、策略预测、动作过滤和 `robot.send_action()`；它与上述独立的无动作
 perception-only 检查是两个入口。默认 Open3D 显示进程以 2 Hz 运行，通过容量为 1 的 latest-frame
 队列接收数据，不会阻塞控制循环。
+
+正式 launcher 的 live perception contract 完全来自所选 PointCloudBuilder YAML。
+`native_depth` 模式保持 `use_depth=true` 且不启用 IR；`ffs_stereo` 模式打开左右
+IR，并从同一次采集取得同步的 RGB/depth/left-IR/right-IR frameset。adapter 发布
+`sidecar.head_left_ir`、`sidecar.head_right_ir`、`head_rgbd_timestamp`、
+`head_rgbd_frame_index` 以及成对的 IR timestamp/frame index 字段。launcher 会把
+这些 canonical observation key 映射到 Builder 配置的 `left_key`/`right_key`，
+`xyzrgb` 时附带 RGB；native depth 不会传给 FFS Builder，也不会作为 fallback。
+启动阶段会在连接机器人前校验 backend artifact、相机几何、帧 metadata、checkpoint
+点云维度（`xyz=3`、`xyzrgb=6`）和固定点数。
 
 默认配置会持续闭环推理，直到在当前终端按 `Ctrl+C`。启动器也会打印 JSONL 日志位置
 和停止命令；也可以在另一个终端执行：

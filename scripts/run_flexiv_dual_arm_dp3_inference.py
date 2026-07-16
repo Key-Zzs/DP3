@@ -57,6 +57,7 @@ for path in (REPO_ROOT, DP3_ROOT, POINTCLOUD_BUILDER_ROOT):
 
 from diffusion_policy_3d.real_world.flexiv_dual_arm_dp3 import (  # noqa: E402
     ACTION_FIELD_NAMES,
+    PointCloudRuntimeContract,
     STATE_FIELD_NAMES,
     SafetyLimits,
     action_vector_to_flexiv_dict,
@@ -69,6 +70,7 @@ from diffusion_policy_3d.real_world.flexiv_dual_arm_dp3 import (  # noqa: E402
     load_dp3_policy_from_checkpoint,
     policy_contract_from_cfg,
     prepare_point_cloud,
+    pointcloud_runtime_contract_from_builder,
     summarize_action,
     validate_agent_pos,
     validate_flexiv_normalizer_contract,
@@ -104,6 +106,11 @@ class _QueuedAction:
     camera_frame_timestamp: float | None
     camera_frame_wall_time: float | None
     camera_frame_index: int | None
+    camera_frame_source_index: int | None
+    camera_frame_left_ir_timestamp: float | None
+    camera_frame_right_ir_timestamp: float | None
+    camera_frame_left_ir_index: int | None
+    camera_frame_right_ir_index: int | None
     point_cloud_padded: bool = False
 
 
@@ -415,28 +422,32 @@ def main() -> int:
         )
 
     builder = _load_pointcloud_builder(args.pointcloud_config)
-    _validate_builder_contract(builder, contract)
-    LOGGER.info("Loaded PointCloudBuilder config=%s device=%s", args.pointcloud_config, builder.device)
-    artifacts = _artifact_audit(args)
+    try:
+        runtime_contract = pointcloud_runtime_contract_from_builder(builder)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Invalid PointCloudBuilder runtime contract: {exc}") from exc
+    _validate_builder_contract(builder, contract, runtime_contract)
+    LOGGER.info(
+        "Loaded PointCloudBuilder config=%s device=%s depth_source=%s output_format=%s "
+        "points=%d ffs_backend=%s",
+        args.pointcloud_config,
+        builder.device,
+        runtime_contract.depth_source,
+        runtime_contract.output_format,
+        runtime_contract.num_points,
+        runtime_contract.ffs_backend or "none",
+    )
+    artifacts = _artifact_audit(args, runtime_contract)
 
     if args.check_config:
-        FlexivDualArmConfig, FlexivDualArm = _load_flexiv_interface(FLEXIV_INTERFACE_DIR)
-        robot_config = _load_flexiv_config(FlexivDualArmConfig, args)
-        _validate_robot_camera_contract(robot_config, builder, args.camera_name)
-        robot_probe = FlexivDualArm(robot_config)
-        _validate_adapter_feature_contract(
-            robot_probe,
-            args.camera_name,
-            default_gripper_state=args.default_gripper_state,
+        return _run_config_check(
+            args=args,
+            cfg=cfg,
+            contract=contract,
+            builder=builder,
+            runtime_contract=runtime_contract,
+            artifacts=artifacts,
         )
-        print(
-            json.dumps(
-                _config_check_summary(args, cfg, contract, builder, robot_config, artifacts),
-                ensure_ascii=True,
-                sort_keys=True,
-            )
-        )
-        return 0
 
     print(f"[inference] checkpoint: {_display_path(args.ckpt)}")
     print(f"[inference] log: {_display_path(args.summary_jsonl)}")
@@ -452,7 +463,7 @@ def main() -> int:
         f"diffusion_steps={policy.num_inference_steps} "
         f"n_action_steps={policy.n_action_steps}"
     )
-    robot = _make_flexiv_robot(args, builder)
+    robot = _make_flexiv_robot(args, builder, runtime_contract)
     limits = SafetyLimits(
         max_cartesian_delta=args.max_cartesian_delta,
         max_rotation_delta=args.max_rotation_delta,
@@ -469,10 +480,50 @@ def main() -> int:
             limits=limits,
             connect_robot=True,
             artifacts=artifacts,
+            runtime_contract=runtime_contract,
         )
     except KeyboardInterrupt:
         print("\n[inference] stopped by user; robot cleanup complete")
         return 0
+
+
+def _run_config_check(
+    *,
+    args: argparse.Namespace,
+    cfg: Any,
+    contract: Any,
+    builder: PointCloudBuilder,
+    runtime_contract: PointCloudRuntimeContract,
+    artifacts: dict[str, Any],
+) -> int:
+    """Validate the complete no-hardware adapter branch used by --check-config."""
+
+    FlexivDualArmConfig, FlexivDualArm = _load_flexiv_interface(FLEXIV_INTERFACE_DIR)
+    robot_config = _load_flexiv_config(FlexivDualArmConfig, args, runtime_contract)
+    _validate_robot_camera_contract(robot_config, builder, args.camera_name)
+    robot_probe = FlexivDualArm(robot_config)
+    _validate_adapter_feature_contract(
+        robot_probe,
+        args.camera_name,
+        runtime_contract=runtime_contract,
+        default_gripper_state=args.default_gripper_state,
+    )
+    print(
+        json.dumps(
+            _config_check_summary(
+                args,
+                cfg,
+                contract,
+                builder,
+                robot_config,
+                artifacts,
+                runtime_contract,
+            ),
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -651,7 +702,10 @@ def _run_inference_loop(
     limits: SafetyLimits,
     connect_robot: bool,
     artifacts: dict[str, Any] | None = None,
+    runtime_contract: PointCloudRuntimeContract | None = None,
 ) -> int:
+    if runtime_contract is None:
+        runtime_contract = pointcloud_runtime_contract_from_builder(builder)
     _enforce_runtime_inference_gates(args, robot, limits, connect_robot=connect_robot)
     agent_history: deque = deque(maxlen=contract.n_obs_steps)
     point_cloud_history: deque = deque(maxlen=contract.n_obs_steps)
@@ -713,12 +767,13 @@ def _run_inference_loop(
             needs_policy_prediction = args.action_mode == "receding" or not action_queue
             if args.action_mode in {"receding", "chunk"}:
                 observation = robot.get_observation()
-                rgbd_reused_by_adapter = _observation_rgbd_reused(observation, args.camera_name)
+                frame_reused_by_adapter = _observation_rgbd_reused(observation, args.camera_name)
                 frame = build_pointcloud_frame_from_observation(
                     observation,
                     camera_name=args.camera_name,
                     rgb_key=args.rgb_key,
                     depth_key=args.depth_key,
+                    runtime_contract=runtime_contract,
                 )
                 camera_frame_summary = _camera_frame_summary(frame)
                 camera_frame_identity = _camera_frame_identity(camera_frame_summary)
@@ -729,26 +784,39 @@ def _run_inference_loop(
                 )
                 if camera_frame_identity is not None:
                     last_camera_frame_identity = camera_frame_identity
-                rgbd_reused = bool(rgbd_reused_by_adapter or rgbd_reused_by_identity)
-                if rgbd_reused and not args.allow_reused_rgbd:
-                    if rgbd_reused_by_adapter:
+                frame_reused = bool(frame_reused_by_adapter or rgbd_reused_by_identity)
+                if frame_reused and not args.allow_reused_rgbd:
+                    source_label = (
+                        "RGB-D"
+                        if runtime_contract.depth_source == "native_depth"
+                        else "stereo IR"
+                    )
+                    if frame_reused_by_adapter:
                         reuse_reason = (
-                            f"{args.camera_name} RGB-D frame is marked reused; refusing to run policy."
+                            f"{args.camera_name} {source_label} frame is marked reused; "
+                            "refusing to run policy."
                         )
                     else:
                         reuse_reason = (
-                            f"{args.camera_name} RGB-D frame has same source identity as previous frame; "
+                            f"{args.camera_name} {source_label} frame has same source identity as previous frame; "
                             "refusing to run policy."
                         )
                     summary = {
                         "step": step_idx,
-                        "event": "reused_rgbd_before_inference",
+                        "event": (
+                            "reused_rgbd_before_inference"
+                            if runtime_contract.depth_source == "native_depth"
+                            else "reused_ffs_stereo_before_inference"
+                        ),
                         "event_reason": f"{reuse_reason} Fix camera streaming before inference.",
                         "mode": args.mode,
                         "action_mode": args.action_mode,
                         "observation_source": observation_source,
+                        "depth_source": runtime_contract.depth_source,
+                        "ffs_backend": runtime_contract.ffs_backend,
                         "camera_frame": camera_frame_summary,
-                        "rgbd_reused_by_adapter": rgbd_reused_by_adapter,
+                        "rgbd_reused_by_adapter": frame_reused_by_adapter,
+                        "frame_reused_by_adapter": frame_reused_by_adapter,
                         "rgbd_reused_by_identity": rgbd_reused_by_identity,
                         "source_frame_identity": _frame_identity_summary(camera_frame_identity),
                         "previous_source_frame_identity": _frame_identity_summary(
@@ -823,6 +891,26 @@ def _run_inference_loop(
                                     camera_frame_summary,
                                     "global_frame_index",
                                 ),
+                                camera_frame_source_index=_summary_int(
+                                    camera_frame_summary,
+                                    "frame_index",
+                                ),
+                                camera_frame_left_ir_timestamp=_summary_float(
+                                    camera_frame_summary,
+                                    "left_ir_timestamp",
+                                ),
+                                camera_frame_right_ir_timestamp=_summary_float(
+                                    camera_frame_summary,
+                                    "right_ir_timestamp",
+                                ),
+                                camera_frame_left_ir_index=_summary_int(
+                                    camera_frame_summary,
+                                    "left_ir_frame_index",
+                                ),
+                                camera_frame_right_ir_index=_summary_int(
+                                    camera_frame_summary,
+                                    "right_ir_frame_index",
+                                ),
                                 point_cloud_padded=bool(pc_meta.get("padded")),
                             )
                             for idx, action in enumerate(action_seq)
@@ -851,6 +939,26 @@ def _run_inference_loop(
                                     camera_frame_summary,
                                     "global_frame_index",
                                 ),
+                                camera_frame_source_index=_summary_int(
+                                    camera_frame_summary,
+                                    "frame_index",
+                                ),
+                                camera_frame_left_ir_timestamp=_summary_float(
+                                    camera_frame_summary,
+                                    "left_ir_timestamp",
+                                ),
+                                camera_frame_right_ir_timestamp=_summary_float(
+                                    camera_frame_summary,
+                                    "right_ir_timestamp",
+                                ),
+                                camera_frame_left_ir_index=_summary_int(
+                                    camera_frame_summary,
+                                    "left_ir_frame_index",
+                                ),
+                                camera_frame_right_ir_index=_summary_int(
+                                    camera_frame_summary,
+                                    "right_ir_frame_index",
+                                ),
                                 point_cloud_padded=bool(pc_meta.get("padded")),
                             )
                         )
@@ -864,8 +972,11 @@ def _run_inference_loop(
                     "crop_empty": pc_meta.get("crop_empty"),
                     "input_empty": pc_meta.get("input_empty"),
                     "padded": pc_meta.get("padded"),
-                    "rgbd_reused": rgbd_reused,
-                    "rgbd_reused_by_adapter": rgbd_reused_by_adapter,
+                    "depth_source": runtime_contract.depth_source,
+                    "ffs_backend": runtime_contract.ffs_backend,
+                    "rgbd_reused": frame_reused,
+                    "rgbd_reused_by_adapter": frame_reused_by_adapter,
+                    "frame_reused_by_adapter": frame_reused_by_adapter,
                     "rgbd_reused_by_identity": rgbd_reused_by_identity,
                 }
                 dump_summary = _dump_sampled_pointcloud(
@@ -879,7 +990,10 @@ def _run_inference_loop(
                 if visualization is not None and visualization_stages is not None:
                     point_cloud_summary["visualization"] = visualization.maybe_publish(
                         step_idx=step_idx,
-                        depth=frame["depth"],
+                        depth=_visualization_depth_from_observation(
+                            observation,
+                            camera_name=args.camera_name,
+                        ),
                         stages=visualization_stages,
                         sampled_point_cloud=pc_np,
                         pointcloud_meta=pc_meta,
@@ -900,6 +1014,13 @@ def _run_inference_loop(
                 "action_mode": args.action_mode,
                 "inference_scheduler": args.inference_scheduler,
                 "observation_source": observation_source,
+                "depth_source": runtime_contract.depth_source,
+                "ffs_backend": runtime_contract.ffs_backend,
+                "pointcloud_output_format": runtime_contract.output_format,
+                "pointcloud_frame_keys": {
+                    "left": runtime_contract.ffs_left_key,
+                    "right": runtime_contract.ffs_right_key,
+                },
                 "predicted_chunk": predicted_chunk,
                 "chunk_index": queued_action.chunk_index,
                 "chunk_size": queued_action.chunk_size,
@@ -1386,6 +1507,26 @@ def _camera_frame_summary(frame: dict[str, Any]) -> dict[str, Any]:
         frame.get("global_frame_index"),
         label="camera_frame.global_frame_index",
     )
+    frame_index = _optional_non_negative_int(
+        frame.get("frame_index"),
+        label="camera_frame.frame_index",
+    )
+    left_ir_timestamp = _optional_float(
+        frame.get("left_ir_timestamp"),
+        label="camera_frame.left_ir_timestamp",
+    )
+    right_ir_timestamp = _optional_float(
+        frame.get("right_ir_timestamp"),
+        label="camera_frame.right_ir_timestamp",
+    )
+    left_ir_frame_index = _optional_non_negative_int(
+        frame.get("left_ir_frame_index"),
+        label="camera_frame.left_ir_frame_index",
+    )
+    right_ir_frame_index = _optional_non_negative_int(
+        frame.get("right_ir_frame_index"),
+        label="camera_frame.right_ir_frame_index",
+    )
     if wall_time is not None:
         age_ms = _wall_time_age_ms(wall_time, label="camera_frame.wall_time")
     else:
@@ -1394,6 +1535,15 @@ def _camera_frame_summary(frame: dict[str, Any]) -> dict[str, Any]:
         "timestamp": timestamp,
         "wall_time": wall_time,
         "global_frame_index": global_frame_index,
+        "frame_index": frame_index,
+        "left_ir_timestamp": left_ir_timestamp,
+        "right_ir_timestamp": right_ir_timestamp,
+        "left_ir_frame_index": left_ir_frame_index,
+        "right_ir_frame_index": right_ir_frame_index,
+        "depth_source": frame.get("depth_source"),
+        "ffs_backend": frame.get("ffs_backend"),
+        "ffs_left_key": frame.get("ffs_left_key"),
+        "ffs_right_key": frame.get("ffs_right_key"),
         "age_ms": age_ms,
     }
 
@@ -1401,6 +1551,12 @@ def _camera_frame_summary(frame: dict[str, Any]) -> dict[str, Any]:
 def _camera_frame_identity(camera_frame: dict[str, Any] | None) -> tuple[str, float] | None:
     if camera_frame is None:
         return None
+    source_frame_index = _optional_non_negative_int(
+        camera_frame.get("frame_index"),
+        label="camera_frame.frame_index",
+    )
+    if source_frame_index is not None:
+        return ("frame_index", float(source_frame_index))
     timestamp = _optional_float(camera_frame.get("timestamp"), label="camera_frame.timestamp")
     if timestamp is not None:
         return ("timestamp", timestamp)
@@ -1443,8 +1599,40 @@ def _source_camera_frame_summary(queued_action: _QueuedAction, now_monotonic: fl
         "timestamp": queued_action.camera_frame_timestamp,
         "wall_time": queued_action.camera_frame_wall_time,
         "global_frame_index": queued_action.camera_frame_index,
+        "frame_index": queued_action.camera_frame_source_index,
+        "left_ir_timestamp": queued_action.camera_frame_left_ir_timestamp,
+        "right_ir_timestamp": queued_action.camera_frame_right_ir_timestamp,
+        "left_ir_frame_index": queued_action.camera_frame_left_ir_index,
+        "right_ir_frame_index": queued_action.camera_frame_right_ir_index,
         "age_ms": age_ms,
     }
+
+
+def _visualization_depth_from_observation(
+    observation: Mapping[str, Any],
+    *,
+    camera_name: str,
+) -> Any:
+    """Return the diagnostic native depth image used by the existing viewer.
+
+    FFS never receives this field.  It is retained in the adapter observation
+    only so the established warmup and monitor remain useful while the builder
+    computes its policy depth from stereo IR.
+    """
+
+    base_name = _camera_base_name(camera_name)
+    key = _first_present_key(
+        observation,
+        (f"sidecar.{base_name}_depth", f"sidecar.{camera_name}_depth"),
+    )
+    if key is None:
+        if "depth" in observation:
+            return observation["depth"]
+        raise KeyError(
+            f"Missing diagnostic native depth for camera {camera_name!r}; "
+            "the live adapter must keep save_depth_sidecar=true for the viewer"
+        )
+    return observation[key]
 
 
 def _policy_output_summary(queued_action: _QueuedAction, action: Any) -> dict[str, Any]:
@@ -1695,8 +1883,13 @@ def _resolve_device(device: str) -> torch.device:
 
 
 def _load_pointcloud_builder(config_path: Path) -> PointCloudBuilder:
-    config = load_pointcloud_config(config_path)
-    return PointCloudBuilder(config)
+    try:
+        config = load_pointcloud_config(config_path)
+        return PointCloudBuilder(config)
+    except (FileNotFoundError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"PointCloudBuilder configuration/backend preflight failed for {config_path}: {exc}"
+        ) from exc
 
 
 def _camera_base_name(camera_name: str) -> str:
@@ -1715,7 +1908,12 @@ def _observation_rgbd_reused(observation: dict[str, Any], camera_name: str) -> b
     return False
 
 
-def _validate_builder_contract(builder: PointCloudBuilder, contract: Any) -> None:
+def _validate_builder_contract(
+    builder: PointCloudBuilder,
+    contract: Any,
+    runtime_contract: PointCloudRuntimeContract | None = None,
+) -> None:
+    runtime_contract = runtime_contract or pointcloud_runtime_contract_from_builder(builder)
     contract_dim = _positive_int(
         getattr(contract, "pointcloud_dim", None),
         label="checkpoint pointcloud_dim",
@@ -1724,17 +1922,13 @@ def _validate_builder_contract(builder: PointCloudBuilder, contract: Any) -> Non
         getattr(contract, "pointcloud_points", None),
         label="checkpoint pointcloud_points",
     )
-    builder_dim = _builder_output_dim(builder)
-    if contract_dim == 6 and builder_dim < 6:
+    builder_dim = runtime_contract.pointcloud_dim
+    if contract_dim != builder_dim:
         raise SystemExit(
-            "Checkpoint expects xyzrgb point clouds, but the PointCloudBuilder "
-            "config has pointcloud.use_rgb=false. Use data_rgb_config.yaml or "
-            "another config that outputs RGB channels."
-        )
-    if contract_dim == 3 and builder_dim > 3:
-        LOGGER.warning(
-            "Checkpoint expects xyz point clouds but builder outputs xyzrgb; "
-            "RGB channels will be truncated before policy inference."
+            "Checkpoint point-cloud shape does not match the PointCloudBuilder output: "
+            f"checkpoint dim={contract_dim}, Builder output_format={runtime_contract.output_format!r} "
+            f"(dim={builder_dim}). Use the matching checkpoint and Builder YAML "
+            "(xyz=3, xyzrgb=6)."
         )
     builder_points = _builder_output_points(builder)
     if builder_points is None:
@@ -1772,6 +1966,13 @@ def _validate_robot_camera_contract(robot_config: Any, builder: PointCloudBuilde
             f"Robot config has no camera named {camera_name!r}. Available cameras: {available}."
         )
     builder_camera = getattr(builder, "camera", None)
+    builder_camera_name = str(getattr(builder_camera, "name", "")).strip()
+    if _camera_base_name(builder_camera_name) != _camera_base_name(camera_name):
+        raise SystemExit(
+            f"PointCloudBuilder camera.name={builder_camera_name!r} does not match the "
+            f"formal Flexiv camera {camera_name!r}. Use the same camera in the Builder "
+            "YAML and robot observation contract."
+        )
     builder_width = _positive_int(
         getattr(builder_camera, "width", None),
         label="PointCloudBuilder camera width",
@@ -1792,7 +1993,7 @@ def _validate_robot_camera_contract(robot_config: Any, builder: PointCloudBuilde
         raise SystemExit(
             f"Robot camera {camera_name!r} is configured as {camera_width}x{camera_height}, "
             f"but PointCloudBuilder expects {builder_width}x{builder_height}. "
-            "Use matching --camera-width/--camera-height or a matching point-cloud config."
+            "Use matching robot and PointCloudBuilder YAML camera dimensions."
         )
 
 
@@ -1800,6 +2001,7 @@ def _validate_adapter_feature_contract(
     robot: Any,
     camera_name: str,
     *,
+    runtime_contract: PointCloudRuntimeContract | None = None,
     default_gripper_state: float | None = None,
 ) -> None:
     observation_features = _adapter_feature_mapping(robot, "observation_features")
@@ -1807,6 +2009,14 @@ def _validate_adapter_feature_contract(
     extra_features = _adapter_feature_mapping(robot, "dataset_extra_features", default={})
     robot_config = getattr(robot, "config", None)
     robot_uses_gripper = bool(getattr(robot_config, "use_gripper", True))
+    if runtime_contract is None:
+        runtime_contract = PointCloudRuntimeContract(
+            depth_source="native_depth",
+            output_format="xyz",
+            use_rgb=False,
+            num_points=1,
+            camera_name=_camera_base_name(camera_name),
+        )
     base_name = _camera_base_name(camera_name)
     state_feature_order = tuple(
         key for key in observation_features if key in set(STATE_FIELD_NAMES)
@@ -1873,9 +2083,45 @@ def _validate_adapter_feature_contract(
             "The inference script requires save_depth_sidecar=true."
         )
     _validate_adapter_feature_shape(extra_features[depth_key], key=depth_key, expected_rank=2)
+    camera_cfg = getattr(robot_config, "cameras", {}).get(camera_name)
+    if camera_cfg is None:
+        raise SystemExit(f"Flexiv adapter config is missing camera {camera_name!r}")
+    if bool(getattr(camera_cfg, "use_depth", False)) is not True:
+        raise SystemExit(
+            f"Flexiv camera {camera_name!r} must keep use_depth=true for the live "
+            "RGB-D warmup/diagnostic contract"
+        )
+    if runtime_contract.depth_source == "ffs_stereo":
+        if bool(getattr(camera_cfg, "use_ir", False)) is not True:
+            raise SystemExit(
+                f"Flexiv camera {camera_name!r} must set use_ir=true for "
+                "depth_source='ffs_stereo'"
+            )
+        ir_keys = (
+            f"sidecar.{base_name}_left_ir",
+            f"sidecar.{base_name}_right_ir",
+        )
+        missing_ir = [key for key in ir_keys if key not in extra_features]
+        if missing_ir:
+            raise SystemExit(
+                "Flexiv adapter dataset_extra_features are missing the FFS stereo IR "
+                "sidecar fields: "
+                + ", ".join(missing_ir)
+                + ". Set save_ir_sidecar=true for the Builder's ffs_stereo route."
+            )
+        for key in ir_keys:
+            _validate_adapter_feature_shape(extra_features[key], key=key, expected_rank=2)
+        if runtime_contract.ffs_left_key is None or runtime_contract.ffs_right_key is None:
+            raise SystemExit("FFS runtime contract is missing Builder left_key/right_key")
+    elif bool(getattr(camera_cfg, "use_ir", False)):
+        raise SystemExit(
+            f"Flexiv camera {camera_name!r} unexpectedly enables IR while "
+            "depth_source='native_depth' is active"
+        )
     metadata_keys = (
         f"{base_name}_rgbd_timestamp",
         f"{base_name}_rgbd_wall_time",
+        f"{base_name}_rgbd_frame_index",
         f"{base_name}_rgbd_reused",
         "global_frame_index",
     )
@@ -1888,6 +2134,22 @@ def _validate_adapter_feature_contract(
         )
     for key in metadata_keys:
         _validate_adapter_feature_shape(extra_features[key], key=key, expected_shape=(1,))
+    if runtime_contract.depth_source == "ffs_stereo":
+        pair_metadata = (
+            f"{base_name}_left_ir_timestamp",
+            f"{base_name}_right_ir_timestamp",
+            f"{base_name}_left_ir_frame_index",
+            f"{base_name}_right_ir_frame_index",
+        )
+        missing_pair_metadata = [key for key in pair_metadata if key not in extra_features]
+        if missing_pair_metadata:
+            raise SystemExit(
+                "Flexiv adapter dataset_extra_features are missing FFS stereo identity "
+                "metadata: "
+                + ", ".join(missing_pair_metadata)
+            )
+        for key in pair_metadata:
+            _validate_adapter_feature_shape(extra_features[key], key=key, expected_shape=(1,))
 
 
 def _adapter_feature_mapping(robot: Any, attr_name: str, *, default: Any = None) -> dict[str, Any]:
@@ -1928,14 +2190,20 @@ def _validate_adapter_feature_shape(
     return shape
 
 
-def _make_flexiv_robot(args: argparse.Namespace, builder: PointCloudBuilder):
+def _make_flexiv_robot(
+    args: argparse.Namespace,
+    builder: PointCloudBuilder,
+    runtime_contract: PointCloudRuntimeContract | None = None,
+):
+    runtime_contract = runtime_contract or pointcloud_runtime_contract_from_builder(builder)
     FlexivDualArmConfig, FlexivDualArm = _load_flexiv_interface(FLEXIV_INTERFACE_DIR)
-    config = _load_flexiv_config(FlexivDualArmConfig, args)
+    config = _load_flexiv_config(FlexivDualArmConfig, args, runtime_contract)
     _validate_robot_camera_contract(config, builder, args.camera_name)
     robot = FlexivDualArm(config)
     _validate_adapter_feature_contract(
         robot,
         args.camera_name,
+        runtime_contract=runtime_contract,
         default_gripper_state=args.default_gripper_state,
     )
     return robot
@@ -1965,7 +2233,19 @@ def _ensure_flexiv_interface_package(interface_dir: Path) -> str:
     return package_name
 
 
-def _load_flexiv_config(FlexivDualArmConfig: Any, args: argparse.Namespace):
+def _load_flexiv_config(
+    FlexivDualArmConfig: Any,
+    args: argparse.Namespace,
+    runtime_contract: PointCloudRuntimeContract | None = None,
+):
+    if runtime_contract is None:
+        runtime_contract = PointCloudRuntimeContract(
+            depth_source="native_depth",
+            output_format="xyz",
+            use_rgb=False,
+            num_points=1,
+            camera_name=_camera_base_name(args.camera_name),
+        )
     raw = _load_yaml(args.robot_config)
     robot_raw = dict(_mapping_section(raw, "robot", default_to_root=True))
     camera_raw = dict(_mapping_section(raw, "cameras"))
@@ -1983,7 +2263,10 @@ def _load_flexiv_config(FlexivDualArmConfig: Any, args: argparse.Namespace):
     set_if_supported("control_mode", "oculus")
     set_if_supported("save_depth_sidecar", True)
     set_if_supported("save_rgbd_timestamps", True)
-    set_if_supported("save_ir_sidecar", False)
+    set_if_supported(
+        "save_ir_sidecar",
+        runtime_contract.depth_source == "ffs_stereo",
+    )
     if getattr(args, "max_cartesian_delta", None) is not None:
         set_if_supported("max_cartesian_delta", float(args.max_cartesian_delta))
     if getattr(args, "max_rotation_delta", None) is not None:
@@ -2020,6 +2303,7 @@ def _load_flexiv_config(FlexivDualArmConfig: Any, args: argparse.Namespace):
                 width=width,
                 height=height,
                 fps=fps,
+                use_ir=runtime_contract.depth_source == "ffs_stereo",
             )
         },
     )
@@ -2074,7 +2358,14 @@ def _bounded_float(value: Any, *, label: str, minimum: float, maximum: float) ->
     return value_f
 
 
-def _make_realsense_config(*, serial_number_or_name: str, width: int, height: int, fps: int):
+def _make_realsense_config(
+    *,
+    serial_number_or_name: str,
+    width: int,
+    height: int,
+    fps: int,
+    use_ir: bool = False,
+):
     package_name = _ensure_flexiv_interface_package(FLEXIV_INTERFACE_DIR)
     camera_mod = importlib.import_module(f"{package_name}.realsense_camera")
     return camera_mod.RealSenseCameraConfig(
@@ -2084,7 +2375,7 @@ def _make_realsense_config(*, serial_number_or_name: str, width: int, height: in
         height=height,
         color_mode=camera_mod.ColorMode.RGB,
         use_depth=True,
-        use_ir=False,
+        use_ir=bool(use_ir),
         rotation=camera_mod.Cv2Rotation.NO_ROTATION,
     )
 
@@ -2096,7 +2387,9 @@ def _config_check_summary(
     builder: PointCloudBuilder,
     robot_config: Any,
     artifacts: dict[str, Any] | None = None,
+    runtime_contract: PointCloudRuntimeContract | None = None,
 ) -> dict[str, Any]:
+    runtime_contract = runtime_contract or pointcloud_runtime_contract_from_builder(builder)
     summary = {
         "config_check": True,
         "mode": args.mode,
@@ -2117,6 +2410,11 @@ def _config_check_summary(
         "point_cloud": {
             "points": contract.pointcloud_points,
             "dim": contract.pointcloud_dim,
+            "depth_source": runtime_contract.depth_source,
+            "output_format": runtime_contract.output_format,
+            "ffs_backend": runtime_contract.ffs_backend,
+            "ffs_left_key": runtime_contract.ffs_left_key,
+            "ffs_right_key": runtime_contract.ffs_right_key,
             "builder_config": _display_path(args.pointcloud_config),
             "builder_config_device": str(getattr(getattr(builder, "config", None), "device", "unknown")),
             "builder_device": str(builder.device),
@@ -2204,6 +2502,7 @@ def _robot_config_summary(
             getattr(robot_config, "max_rotation_delta", None)
         ),
         "save_depth_sidecar": bool(getattr(robot_config, "save_depth_sidecar", False)),
+        "save_ir_sidecar": bool(getattr(robot_config, "save_ir_sidecar", False)),
         "save_rgbd_timestamps": bool(getattr(robot_config, "save_rgbd_timestamps", False)),
     }
     if include_cameras:
@@ -2216,6 +2515,7 @@ def _robot_config_summary(
                 "fps": getattr(camera_cfg, "fps", None),
                 "serial_configured": bool(getattr(camera_cfg, "serial_number_or_name", None)),
                 "use_depth": getattr(camera_cfg, "use_depth", None),
+                "use_ir": getattr(camera_cfg, "use_ir", None),
             }
         summary["cameras"] = cameras
     return summary
@@ -2233,7 +2533,10 @@ def _optional_robot_float(value: Any) -> float | None:
     return float(value)
 
 
-def _artifact_audit(args: argparse.Namespace) -> dict[str, Any]:
+def _artifact_audit(
+    args: argparse.Namespace,
+    runtime_contract: PointCloudRuntimeContract | None = None,
+) -> dict[str, Any]:
     artifacts = {
         "checkpoint": _file_audit(args.ckpt),
         "inference_config": _file_audit(args.config_path),
@@ -2242,7 +2545,35 @@ def _artifact_audit(args: argparse.Namespace) -> dict[str, Any]:
     robot_config = getattr(args, "robot_config", None)
     if robot_config is not None:
         artifacts["robot_config"] = _file_audit(robot_config)
+    if runtime_contract is not None and runtime_contract.depth_source == "ffs_stereo":
+        artifacts["ffs"] = _preflight_ffs_artifacts(runtime_contract)
     return artifacts
+
+
+def _preflight_ffs_artifacts(runtime_contract: PointCloudRuntimeContract) -> dict[str, Any]:
+    """Reuse the exporter/FFS manifest preflight before any robot is created."""
+
+    if runtime_contract.depth_source != "ffs_stereo" or runtime_contract.ffs_config is None:
+        return {"depth_source": runtime_contract.depth_source}
+    if not runtime_contract.ffs_artifact_id:
+        raise SystemExit(
+            "FFS Builder YAML must declare depth_source.ffs.artifact_id before live inference"
+        )
+    try:
+        from tools import export_lerobot_to_dp3_zarr as exporter
+
+        ffs = {
+            field.name: getattr(runtime_contract.ffs_config, field.name)
+            for field in fields(type(runtime_contract.ffs_config))
+        }
+        return exporter._preflight_ffs_artifacts(
+            ffs,
+            config_dir=Path.cwd(),
+            backend=str(runtime_contract.ffs_backend),
+            artifact_id=runtime_contract.ffs_artifact_id,
+        )
+    except (FileNotFoundError, KeyError, TypeError, ValueError, OSError) as exc:
+        raise SystemExit(f"FFS live artifact preflight failed: {exc}") from exc
 
 
 def _file_audit(path: str | Path) -> dict[str, Any]:

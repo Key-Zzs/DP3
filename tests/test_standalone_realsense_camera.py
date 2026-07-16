@@ -44,6 +44,22 @@ class _FakeFrameset:
         return self.depth
 
 
+class _FakeIRFrameset(_FakeFrameset):
+    def __init__(
+        self,
+        color: _FakeFrame,
+        depth: _FakeFrame,
+        left: _FakeFrame,
+        right: _FakeFrame,
+    ) -> None:
+        super().__init__(color, depth)
+        self.left = left
+        self.right = right
+
+    def get_infrared_frame(self, stream_index: int) -> _FakeFrame:
+        return self.left if stream_index == 1 else self.right
+
+
 def test_copy_frame_data_owns_contiguous_memory() -> None:
     camera_mod = _camera_module()
     source = np.arange(12, dtype=np.uint16).reshape(3, 4)
@@ -85,6 +101,35 @@ def test_rgbd_frame_survives_sdk_buffer_reuse() -> None:
     assert result["depth"].flags.c_contiguous
     assert int(result["rgb"].sum()) == 66
     assert result["depth"].tolist() == [[100, 200], [300, 400]]
+
+
+def test_ffs_rgbd_frame_contains_same_frameset_ir_identity() -> None:
+    camera_mod = _camera_module()
+    camera = camera_mod.RealSenseCamera(
+        camera_mod.RealSenseCameraConfig(
+            serial_number_or_name="1234",
+            fps=30,
+            width=2,
+            height=2,
+            color_mode=camera_mod.ColorMode.RGB,
+            use_depth=True,
+            use_ir=True,
+            rotation=camera_mod.Cv2Rotation.NO_ROTATION,
+        )
+    )
+    result = camera._frameset_to_rgbd_ir(
+        _FakeIRFrameset(
+            _FakeFrame(np.zeros((2, 2, 3), dtype=np.uint8), timestamp=12.5, number=7),
+            _FakeFrame(np.ones((2, 2), dtype=np.uint16), timestamp=12.5, number=7),
+            _FakeFrame(np.zeros((2, 2), dtype=np.uint8), timestamp=12.5, number=7),
+            _FakeFrame(np.ones((2, 2), dtype=np.uint8), timestamp=12.5, number=7),
+        )
+    )
+
+    assert result["left_ir"].shape == (2, 2)
+    assert result["right_ir"].shape == (2, 2)
+    assert result["left_ir_timestamp"] == result["right_ir_timestamp"] == 12.5
+    assert result["left_ir_frame_index"] == result["right_ir_frame_index"] == 7
 
 
 class _WarmupCamera:

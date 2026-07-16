@@ -524,6 +524,10 @@ class RealSenseCamera:
             right_ir_raw = _copy_frame_data(right_ir_frame)
             frame["left_ir"] = self._postprocess_image(left_ir_raw, depth_frame=True)
             frame["right_ir"] = self._postprocess_image(right_ir_raw, depth_frame=True)
+            frame["left_ir_timestamp"] = float(left_ir_frame.get_timestamp())
+            frame["right_ir_timestamp"] = float(right_ir_frame.get_timestamp())
+            frame["left_ir_frame_index"] = int(left_ir_frame.get_frame_number())
+            frame["right_ir_frame_index"] = int(right_ir_frame.get_frame_number())
 
         return frame
 
