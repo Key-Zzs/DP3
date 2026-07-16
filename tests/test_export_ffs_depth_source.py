@@ -219,20 +219,21 @@ def _resolution(mode: str, tmp_path: Path) -> exporter.BuilderConfigResolution:
 
 
 def _args(tmp_path: Path, output: Path, *, mode: str) -> argparse.Namespace:
+    builder_path = tmp_path / "builder.yaml"
+    config = {
+        "camera": {"name": "head"},
+        "pointcloud": {"use_rgb": False, "output_format": "xyz"},
+        "sampling": {"enabled": True, "num_points": 4},
+        "depth_source": {"mode": "frame" if mode == "native_depth" else mode},
+    }
+    if mode == "ffs_stereo":
+        config["depth_source"]["ffs"] = {}
+    builder_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     return argparse.Namespace(
         lerobot_path=str(tmp_path),
         output_zarr=str(output),
-        camera="head",
         rgbd_sidecar_source="auto",
-        pointcloud_mode="xyz",
-        num_points=4,
-        builder_config=str(tmp_path / "builder.yaml"),
-        depth_source=mode,
-        ffs_backend=None,
-        ffs_artifact_id=None,
-        ffs_precision=None,
-        ffs_builder_optimization_level=None,
-        ffs_workspace_gib=None,
+        builder_config=str(builder_path),
         target_state_schema=exporter.TARGET_STATE_SCHEMA,
         allow_legacy_state_conversion=False,
         overwrite=False,
@@ -266,10 +267,22 @@ def _run_export(
     return exporter.export_lerobot_to_dp3_zarr(args)
 
 
-def test_parse_args_defaults_depth_source_to_native(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["export_lerobot_to_dp3_zarr.py", "--lerobot-path", "/tmp/dataset"])
+def test_parse_args_requires_builder_config_and_has_no_builder_overrides(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_lerobot_to_dp3_zarr.py",
+            "--lerobot-path",
+            "/tmp/dataset",
+            "--builder-config",
+            "/tmp/builder.yaml",
+        ],
+    )
     args = exporter.parse_args()
-    assert args.depth_source == "native_depth"
+    assert args.builder_config == "/tmp/builder.yaml"
+    for name in ("camera", "pointcloud_mode", "num_points", "depth_source", "ffs_backend"):
+        assert not hasattr(args, name)
 
 
 def test_native_routes_depth_without_ir_and_preserves_schema(monkeypatch, tmp_path):
@@ -375,76 +388,13 @@ def test_ffs_backend_construction_failure_has_no_native_fallback(monkeypatch, tm
     assert not output.exists()
 
 
-def test_cli_yaml_backend_conflict_fails_fast(tmp_path):
-    config_path = tmp_path / "builder.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "camera": {},
-                "pointcloud": {"use_rgb": False, "output_format": "xyz"},
-                "depth_source": {"mode": "ffs_stereo", "ffs": {"backend": "pytorch", "artifact_id": "fp16_o3"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    args = SimpleNamespace(
-        builder_config=str(config_path),
-        lerobot_path=str(tmp_path),
-        camera="head",
-        pointcloud_mode="xyz",
-        num_points=4,
-        depth_source="ffs_stereo",
-        ffs_backend="tensorrt_single",
-        ffs_artifact_id=None,
-        ffs_precision=None,
-        ffs_builder_optimization_level=None,
-        ffs_workspace_gib=None,
-    )
-    with pytest.raises(ValueError, match="CLI/YAML conflict for backend"):
-        exporter._resolve_ffs_builder_config(
-            args=args,
-            output_zarr=tmp_path / "out.zarr",
-            realsense_calibration={},
-        )
-
-
-@pytest.mark.parametrize(
-    ("key", "yaml_value", "cli_value"),
-    [
-        ("artifact_id", "fp16_o3", "fp32_o0"),
-        ("precision", "fp16", "fp32"),
-        ("builder_optimization_level", 3, 0),
-        ("workspace_gib", 8.0, 4.0),
-    ],
-)
-def test_cli_yaml_ffs_scalar_conflicts_fail_fast(key, yaml_value, cli_value):
-    fields = {key: yaml_value}
-    with pytest.raises(ValueError, match=f"CLI/YAML conflict for {key}"):
-        exporter._resolve_ffs_option(
-            fields,
-            key=key,
-            cli_value=cli_value,
-            default=None,
-            normalizer=(lambda value: str(value)) if key in {"artifact_id", "precision"} else (lambda value: float(value)),
-        )
-
-
 def test_ffs_requires_explicit_builder_yaml(tmp_path):
     args = argparse.Namespace(
         lerobot_path=str(tmp_path),
         output_zarr=str(tmp_path / "out.zarr"),
-        camera="head",
-        pointcloud_mode="xyz",
-        num_points=4,
-        depth_source="ffs_stereo",
         builder_config=None,
-        ffs_backend=None,
-        ffs_artifact_id=None,
-        ffs_precision=None,
-        ffs_builder_optimization_level=None,
-        ffs_workspace_gib=None,
     )
-    with pytest.raises(ValueError, match="requires an explicit --builder-config"):
+    with pytest.raises(ValueError, match="--builder-config is required"):
         exporter._resolve_builder_config_for_export(
             args=args,
             output_zarr=tmp_path / "out.zarr",
@@ -452,12 +402,12 @@ def test_ffs_requires_explicit_builder_yaml(tmp_path):
         )
 
 
-def test_native_mode_rejects_ffs_builder_yaml_before_runtime_import(tmp_path):
+def test_builder_config_contract_reads_ffs_mode(tmp_path):
     config_path = tmp_path / "ffs_builder.yaml"
     config_path.write_text(
         yaml.safe_dump(
             {
-                "camera": {},
+                "camera": {"name": "head"},
                 "pointcloud": {"use_rgb": False, "output_format": "xyz"},
                 "depth_source": {"mode": "ffs_stereo", "ffs": {}},
             }
@@ -467,22 +417,10 @@ def test_native_mode_rejects_ffs_builder_yaml_before_runtime_import(tmp_path):
     args = argparse.Namespace(
         builder_config=str(config_path),
         lerobot_path=str(tmp_path),
-        camera="head",
-        pointcloud_mode="xyz",
-        num_points=4,
-        depth_source="native_depth",
-        ffs_backend=None,
-        ffs_artifact_id=None,
-        ffs_precision=None,
-        ffs_builder_optimization_level=None,
-        ffs_workspace_gib=None,
     )
-    with pytest.raises(ValueError, match="conflicts with Builder YAML"):
-        exporter._resolve_builder_config_for_export(
-            args=args,
-            output_zarr=tmp_path / "out.zarr",
-            realsense_calibration={},
-        )
+    contract = exporter._apply_builder_config_contract(args)
+    assert contract.depth_source == "ffs_stereo"
+    assert args.depth_source == "ffs_stereo"
 
 
 def test_native_mode_does_not_import_optional_ffs_runtime_modules(monkeypatch, tmp_path):

@@ -16,7 +16,7 @@ import time
 import types
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -165,7 +165,6 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         mode="inference",
         gpu_id=int(inference["gpu_id"]),
         device=str(inference["device"]),
-        pointcloud_device=str(pointcloud["device"]),
         duration_seconds=duration_seconds,
         num_steps=num_steps,
         rate_hz=rate_hz,
@@ -415,7 +414,7 @@ def main() -> int:
             steps=args.policy_warmup_steps,
         )
 
-    builder = _load_pointcloud_builder(args.pointcloud_config, args.pointcloud_device)
+    builder = _load_pointcloud_builder(args.pointcloud_config)
     _validate_builder_contract(builder, contract)
     LOGGER.info("Loaded PointCloudBuilder config=%s device=%s", args.pointcloud_config, builder.device)
     artifacts = _artifact_audit(args)
@@ -502,10 +501,6 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.device.startswith("cuda") and args.device != "cuda:0":
         raise SystemExit(
             "inference.device must be cuda:0 after gpu_id masks the selected physical GPU"
-        )
-    if args.pointcloud_device.startswith("cuda") and args.pointcloud_device != "cuda:0":
-        raise SystemExit(
-            "pointcloud.device must be cuda:0 after gpu_id masks the selected physical GPU"
         )
     if args.log_level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
         raise SystemExit("inference.log_level must be DEBUG, INFO, WARNING, or ERROR")
@@ -620,8 +615,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         if value is None:
             continue
         setattr(args, name, _positive_int(value, label=f"--{name.replace('_', '-')}"))
-    if args.pointcloud_device is not None:
-        args.pointcloud_device = _validate_pointcloud_device_arg(args.pointcloud_device)
     for name in (
         "max_policy_latency_ms",
         "max_camera_frame_age_ms",
@@ -1487,7 +1480,6 @@ def _runtime_devices_summary(
         "policy_device": str(policy_device),
         "pointcloud_device": str(getattr(builder, "device", "unknown")),
         "pointcloud_config_device": str(getattr(builder_config, "device", "unknown")),
-        "pointcloud_device_override": getattr(args, "pointcloud_device", None),
     }
 
 
@@ -1702,23 +1694,8 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def _validate_pointcloud_device_arg(device: Any) -> str:
-    device_str = str(device).strip()
-    if not device_str:
-        raise SystemExit("--pointcloud-device must be a non-empty torch device or 'auto'")
-    if device_str.lower() == "auto":
-        return "auto"
-    try:
-        torch.device(device_str)
-    except (RuntimeError, TypeError):
-        raise SystemExit(f"--pointcloud-device is not a valid torch device: {device_str}") from None
-    return device_str
-
-
-def _load_pointcloud_builder(config_path: Path, pointcloud_device: str | None) -> PointCloudBuilder:
+def _load_pointcloud_builder(config_path: Path) -> PointCloudBuilder:
     config = load_pointcloud_config(config_path)
-    if pointcloud_device is not None:
-        config = replace(config, device=pointcloud_device)
     return PointCloudBuilder(config)
 
 
@@ -2143,7 +2120,6 @@ def _config_check_summary(
             "builder_config": _display_path(args.pointcloud_config),
             "builder_config_device": str(getattr(getattr(builder, "config", None), "device", "unknown")),
             "builder_device": str(builder.device),
-            "builder_device_override": args.pointcloud_device,
             "builder_output_dim": _builder_output_dim(builder),
             "builder_output_points": _builder_output_points(builder),
         },

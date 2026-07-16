@@ -112,7 +112,6 @@ robot:
 
 pointcloud:
   config: third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml
-  device: cuda:0
 
 inference:
   gpu_id: 0

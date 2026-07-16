@@ -86,6 +86,18 @@ class _FakeBuilder:
 
 
 def _debug_args(tmp_path: Path) -> debug_lerobot.DebugInputs:
+    builder_path = tmp_path / "ffs.yaml"
+    builder_path.write_text(
+        yaml.safe_dump(
+            {
+                "camera": {"name": "head"},
+                "pointcloud": {"use_rgb": False, "output_format": "xyz"},
+                "sampling": {"enabled": True, "num_points": 4},
+                "depth_source": {"mode": "ffs_stereo", "ffs": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
     args = debug_lerobot.DebugInputs()
     args.lerobot_path = tmp_path
     args.frame_index = 0
@@ -93,7 +105,7 @@ def _debug_args(tmp_path: Path) -> debug_lerobot.DebugInputs:
     args.rgbd_sidecar_source = "auto"
     args.pointcloud_mode = "xyz"
     args.num_points = 4
-    args.builder_config = str(tmp_path / "ffs.yaml")
+    args.builder_config = str(builder_path)
     args.depth_source = "ffs_stereo"
     args.ffs_backend = "pytorch"
     args.ffs_artifact_id = "fake"
@@ -155,17 +167,8 @@ def test_zarr_debug_infers_ffs_contract_from_attrs(tmp_path):
         dp3_zarr=str(tmp_path / "ffs.zarr"),
         frame_index=0,
         lerobot_path=None,
-        camera=None,
         rgbd_sidecar_source=None,
-        pointcloud_mode=None,
-        num_points=None,
         builder_config=None,
-        depth_source=None,
-        ffs_backend=None,
-        ffs_artifact_id=None,
-        ffs_precision=None,
-        ffs_builder_optimization_level=None,
-        ffs_workspace_gib=None,
         window_width=1800,
         window_height=760,
         point_size=2.0,
@@ -173,27 +176,24 @@ def test_zarr_debug_infers_ffs_contract_from_attrs(tmp_path):
     )
     attrs = {
         "source_lerobot_path": str(tmp_path / "dataset"),
-        "camera": "head",
-        "pointcloud_mode": "xyz",
-        "num_points": 1024,
         "source_sidecar_storage": "zarr_v2",
-        "depth_source": "ffs_stereo",
-        "ffs_backend": "tensorrt_single",
-        "artifact_id": "fp16_o3",
-        "precision": "fp16",
-        "builder_optimization_level": 3,
-        "workspace_gib": 8.0,
-        "pointcloud_builder_config": {"depth_source": {"mode": "ffs_stereo"}},
+        "pointcloud_builder_config": {
+            "camera": {"name": "head"},
+            "pointcloud": {"use_rgb": False, "output_format": "xyz"},
+            "sampling": {"enabled": True, "num_points": 1024},
+            "depth_source": {
+                "mode": "ffs_stereo",
+                "ffs": {"backend": "tensorrt_single", "artifact_id": "fp16_o3"},
+            },
+        },
     }
 
     resolved = debug_zarr._lerobot_args_from_zarr_attrs(args, attrs, tmp_path / "tmp")
 
     assert resolved.depth_source == "ffs_stereo"
-    assert resolved.ffs_backend == "tensorrt_single"
-    assert resolved.ffs_artifact_id == "fp16_o3"
-    assert resolved.ffs_precision == "fp16"
-    assert resolved.ffs_builder_optimization_level == 3
-    assert resolved.ffs_workspace_gib == 8.0
+    assert resolved.camera == "head"
+    assert resolved.pointcloud_mode == "xyz"
+    assert resolved.num_points == 1024
     assert Path(resolved.builder_config).is_file()
 
 
@@ -242,25 +242,23 @@ def test_live_perception_ffs_preflights_declared_route(monkeypatch, tmp_path):
     assert perception_only._resolve_live_depth_source(args, config_path) == "ffs_stereo"
 
 
-def test_live_perception_rejects_native_mode_with_ffs_yaml(tmp_path):
+def test_live_perception_uses_ffs_mode_from_builder_yaml(monkeypatch, tmp_path):
     config_path = tmp_path / "ffs.yaml"
     config_path.write_text(
-        yaml.safe_dump({"depth_source": {"mode": "ffs_stereo", "ffs": {}}}),
+        yaml.safe_dump(
+            {
+                "camera": {"name": "head"},
+                "pointcloud": {"use_rgb": False, "output_format": "xyz"},
+                "depth_source": {
+                    "mode": "ffs_stereo",
+                    "ffs": {
+                        "backend": "pytorch",
+                        "artifact_id": "fp16_o3",
+                    },
+                },
+            }
+        ),
         encoding="utf-8",
     )
-    args = argparse.Namespace(
-        builder_config=config_path,
-        depth_source="native_depth",
-        ffs_backend=None,
-        ffs_artifact_id=None,
-        ffs_precision=None,
-        ffs_builder_optimization_level=None,
-        ffs_workspace_gib=None,
-    )
-
-    try:
-        perception_only._resolve_live_depth_source(args, config_path)
-    except SystemExit as exc:
-        assert "conflicts with Builder YAML" in str(exc)
-    else:
-        raise AssertionError("native mode unexpectedly accepted an FFS Builder YAML")
+    monkeypatch.setattr(perception_only.exporter, "_preflight_ffs_artifacts", lambda *a, **k: {})
+    assert perception_only._resolve_live_depth_source(argparse.Namespace(), config_path) == "ffs_stereo"

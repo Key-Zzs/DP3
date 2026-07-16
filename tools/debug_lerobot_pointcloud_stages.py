@@ -39,58 +39,26 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Zero-based dataset/export row index to inspect.",
     )
-    parser.add_argument("--camera", choices=sorted(exporter.CAMERA_SPECS), default="head")
     parser.add_argument(
         "--rgbd-sidecar-source",
         choices=["auto", "zarr", "parquet"],
         default="auto",
         help="Select raw Zarr, legacy Parquet, or strict manifest-based auto detection.",
     )
-    parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default="xyz")
-    parser.add_argument("--num-points", type=int, default=1024)
-    parser.add_argument("--builder-config", help="Optional PointCloudBuilder YAML path.")
     parser.add_argument(
-        "--depth-source",
-        choices=exporter.DEPTH_SOURCES,
-        default="native_depth",
-        help="Depth input for the shared PointCloudBuilder path (default: native_depth).",
+        "--builder-config",
+        required=True,
+        help="PointCloudBuilder YAML; camera, point-cloud, sampling, and depth settings come from it.",
     )
-    parser.add_argument("--ffs-backend", choices=exporter.FFS_BACKENDS)
-    parser.add_argument("--ffs-artifact-id")
-    parser.add_argument("--ffs-precision", choices=("fp16", "fp32"))
-    parser.add_argument(
-        "--ffs-builder-optimization-level",
-        type=int,
-        choices=range(6),
-        metavar="0..5",
-    )
-    parser.add_argument("--ffs-workspace-gib", type=float)
     parser.add_argument("--window-width", type=int, default=1800)
     parser.add_argument("--window-height", type=int, default=760)
     parser.add_argument("--point-size", type=float, default=2.0)
     parser.add_argument("--no-show", action="store_true", help="Process and print stats without Open3D GUI.")
     args = parser.parse_args()
-    if args.num_points is not None and args.num_points <= 0:
-        parser.error("--num-points must be positive")
     if args.window_width <= 0 or args.window_height <= 0:
         parser.error("--window-width and --window-height must be positive")
     if args.point_size <= 0:
         parser.error("--point-size must be positive")
-    if args.ffs_workspace_gib is not None and args.ffs_workspace_gib <= 0:
-        parser.error("--ffs-workspace-gib must be positive")
-    if args.depth_source == "ffs_stereo" and args.builder_config is None:
-        parser.error("--depth-source=ffs_stereo requires --builder-config")
-    if args.depth_source == "native_depth" and any(
-        value is not None
-        for value in (
-            args.ffs_backend,
-            args.ffs_artifact_id,
-            args.ffs_precision,
-            args.ffs_builder_optimization_level,
-            args.ffs_workspace_gib,
-        )
-    ):
-        parser.error("FFS options require --depth-source=ffs_stereo")
     return args
 
 
@@ -127,17 +95,13 @@ class DebugInputs(argparse.Namespace):
     num_points: int
     builder_config: str | None
     depth_source: str
-    ffs_backend: str | None
-    ffs_artifact_id: str | None
-    ffs_precision: str | None
-    ffs_builder_optimization_level: int | None
-    ffs_workspace_gib: float | None
     dp3_zarr: Path | None
     temp_config_path: Path | None
     debug_output_path: Path
 
 
 def _resolve_debug_inputs(args: argparse.Namespace, tmp_dir: Path) -> DebugInputs:
+    exporter._apply_builder_config_contract(args)
     lerobot_path = Path(args.lerobot_path).expanduser()
     if not lerobot_path.is_absolute():
         raise ValueError("--lerobot-path must be an absolute path")
@@ -146,19 +110,10 @@ def _resolve_debug_inputs(args: argparse.Namespace, tmp_dir: Path) -> DebugInput
         raise FileNotFoundError(f"LeRobot dataset path does not exist: {lerobot_path}")
 
     camera = args.camera
-    if camera not in exporter.CAMERA_SPECS:
-        raise ValueError(f"Unsupported camera: {camera}")
     pointcloud_mode = args.pointcloud_mode
-    if pointcloud_mode not in {"xyz", "xyzrgb"}:
-        raise ValueError("--pointcloud-mode must be 'xyz' or 'xyzrgb'")
     num_points = int(args.num_points)
-    if num_points <= 0:
-        raise ValueError("--num-points must be positive")
-
     builder_config = args.builder_config
     temp_config_path: Path | None = None
-    if builder_config is None:
-        temp_config_path = tmp_dir / "pointcloud_builder_debug.yaml"
 
     resolved = DebugInputs()
     resolved.lerobot_path = lerobot_path
@@ -169,11 +124,6 @@ def _resolve_debug_inputs(args: argparse.Namespace, tmp_dir: Path) -> DebugInput
     resolved.num_points = num_points
     resolved.builder_config = builder_config
     resolved.depth_source = getattr(args, "depth_source", "native_depth")
-    resolved.ffs_backend = getattr(args, "ffs_backend", None)
-    resolved.ffs_artifact_id = getattr(args, "ffs_artifact_id", None)
-    resolved.ffs_precision = getattr(args, "ffs_precision", None)
-    resolved.ffs_builder_optimization_level = getattr(args, "ffs_builder_optimization_level", None)
-    resolved.ffs_workspace_gib = getattr(args, "ffs_workspace_gib", None)
     dp3_zarr = getattr(args, "dp3_zarr", None)
     resolved.dp3_zarr = Path(dp3_zarr).expanduser().resolve() if dp3_zarr else None
     resolved.temp_config_path = temp_config_path

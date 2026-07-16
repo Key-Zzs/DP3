@@ -655,6 +655,7 @@ def test_debug_reads_zarr_frame_through_unified_source(tmp_path) -> None:
     spec.loader.exec_module(debug)
 
     dataset = _make_dataset(tmp_path, layout="zarr")
+    builder_config = _builder_config(dataset, tmp_path / "debug_builder.yaml", mode="xyz")
     args = debug.DebugInputs()
     args.lerobot_path = dataset.root.resolve()
     args.frame_index = 2
@@ -662,7 +663,7 @@ def test_debug_reads_zarr_frame_through_unified_source(tmp_path) -> None:
     args.rgbd_sidecar_source = "auto"
     args.pointcloud_mode = "xyz"
     args.num_points = H * W
-    args.builder_config = None
+    args.builder_config = str(builder_config)
     args.dp3_zarr = None
     args.temp_config_path = tmp_path / "debug_builder.yaml"
 

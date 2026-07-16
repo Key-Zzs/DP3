@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import importlib
 import json
 import logging
@@ -69,29 +68,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-valid-depth-ratio", type=float, default=None)
     parser.add_argument("--max-valid-depth-ratio-range", type=float, default=None)
     parser.add_argument("--camera-timeout-ms", type=int, default=None)
-    parser.add_argument("--pointcloud-device", default=None)
     parser.add_argument(
         "--builder-config",
         type=Path,
         default=None,
         help="Override pointcloud.config with an explicit PointCloudBuilder YAML.",
     )
-    parser.add_argument(
-        "--depth-source",
-        choices=exporter.DEPTH_SOURCES,
-        default="native_depth",
-        help="Depth input for PointCloudBuilder (default: native_depth).",
-    )
-    parser.add_argument("--ffs-backend", choices=exporter.FFS_BACKENDS)
-    parser.add_argument("--ffs-artifact-id")
-    parser.add_argument("--ffs-precision", choices=("fp16", "fp32"))
-    parser.add_argument(
-        "--ffs-builder-optimization-level",
-        type=int,
-        choices=range(6),
-        metavar="0..5",
-    )
-    parser.add_argument("--ffs-workspace-gib", type=float)
     parser.add_argument("--log-dir", type=Path, default=REPO_ROOT / "logs")
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument(
@@ -127,19 +109,6 @@ def _validate_cli_args(args: argparse.Namespace) -> None:
             raise SystemExit(f"--{name.replace('_', '-')} must be in [0, 1]")
     if args.viewer_rate_hz is not None and float(args.viewer_rate_hz) <= 0.0:
         raise SystemExit("--viewer-rate-hz must be positive")
-    if args.ffs_workspace_gib is not None and args.ffs_workspace_gib <= 0:
-        raise SystemExit("--ffs-workspace-gib must be positive")
-    if args.depth_source == "native_depth" and any(
-        value is not None
-        for value in (
-            args.ffs_backend,
-            args.ffs_artifact_id,
-            args.ffs_precision,
-            args.ffs_builder_optimization_level,
-            args.ffs_workspace_gib,
-        )
-    ):
-        raise SystemExit("FFS options require --depth-source=ffs_stereo")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -301,7 +270,7 @@ def _load_runtime(args: argparse.Namespace) -> Runtime:
         robot_config_path=robot_config_path,
         pointcloud_config_path=pointcloud_config_path,
         depth_source=depth_source,
-        pointcloud_device=args.pointcloud_device or pointcloud_section.get("device", "auto"),
+        pointcloud_device=pointcloud_section.get("device", "auto"),
         camera_serial=camera_serial,
         camera_fps=int(robot_section.get("camera_fps", 30)),
         camera_width=int(cameras_raw.get("width", 640)),
@@ -360,52 +329,27 @@ def _make_builder(runtime: Runtime) -> PointCloudBuilder:
 def _resolve_live_depth_source(args: argparse.Namespace, builder_path: Path) -> str:
     """Validate the live Builder YAML without changing the file on disk."""
 
+    del args
     raw = exporter._read_yaml(builder_path)
-    declared = raw.get("depth_source")
-    if isinstance(declared, Mapping):
-        declared_mode = str(declared.get("mode", "")).strip().lower()
-    elif isinstance(declared, str):
-        declared_mode = declared.strip().lower()
-    else:
-        declared_mode = ""
-    if declared_mode == "frame":
-        declared_mode = "native_depth"
-    if declared_mode and declared_mode not in exporter.DEPTH_SOURCES:
-        raise SystemExit(f"Unsupported Builder depth_source.mode={declared_mode!r}")
-    if declared_mode and declared_mode != args.depth_source:
-        raise SystemExit(
-            f"--depth-source={args.depth_source!r} conflicts with Builder YAML "
-            f"depth_source.mode={declared_mode!r}"
-        )
-    if args.depth_source == "native_depth":
+    contract = exporter._read_builder_config_contract(builder_path)
+    if contract.depth_source == "native_depth":
         return "native_depth"
-    if args.builder_config is None:
-        raise SystemExit("--depth-source=ffs_stereo requires --builder-config")
+    declared = raw.get("depth_source")
     if not isinstance(declared, Mapping) or not isinstance(declared.get("ffs"), Mapping):
         raise SystemExit("FFS Builder YAML must contain depth_source.ffs")
 
-    ffs = copy.deepcopy(dict(declared["ffs"]))
+    ffs = dict(declared["ffs"])
     backend = str(ffs.get("backend", "")).strip().lower()
     if backend not in exporter.FFS_BACKENDS:
         raise SystemExit(f"FFS Builder YAML backend must be one of {exporter.FFS_BACKENDS}")
     artifact_id = str(ffs.get("artifact_id", "")).strip()
     if not artifact_id:
         raise SystemExit("FFS Builder YAML must declare depth_source.ffs.artifact_id")
-    _check_live_ffs_cli_contract(args, ffs, "backend", backend)
-    _check_live_ffs_cli_contract(args, ffs, "artifact_id", artifact_id)
     precision = str(ffs.get("precision", exporter.FFS_DEFAULT_PRECISION)).strip().lower()
-    _check_live_ffs_cli_contract(args, ffs, "precision", precision)
     optimization_level = int(
         ffs.get("builder_optimization_level", exporter.FFS_DEFAULT_BUILDER_OPTIMIZATION_LEVEL)
     )
-    _check_live_ffs_cli_contract(
-        args,
-        ffs,
-        "builder_optimization_level",
-        optimization_level,
-    )
     workspace_gib = float(ffs.get("workspace_gib", exporter.FFS_DEFAULT_WORKSPACE_GIB))
-    _check_live_ffs_cli_contract(args, ffs, "workspace_gib", workspace_gib)
     ffs.update(
         {
             "backend": backend,
@@ -438,33 +382,6 @@ def _resolve_live_depth_source(args: argparse.Namespace, builder_path: Path) -> 
     except (FileNotFoundError, ValueError, KeyError) as exc:
         raise SystemExit(f"FFS live artifact preflight failed: {exc}") from exc
     return "ffs_stereo"
-
-
-def _check_live_ffs_cli_contract(
-    args: argparse.Namespace,
-    ffs: Mapping[str, Any],
-    key: str,
-    yaml_value: Any,
-) -> None:
-    cli_key = {
-        "backend": "ffs_backend",
-        "artifact_id": "ffs_artifact_id",
-        "precision": "ffs_precision",
-        "builder_optimization_level": "ffs_builder_optimization_level",
-        "workspace_gib": "ffs_workspace_gib",
-    }[key]
-    cli_value = getattr(args, cli_key, None)
-    if cli_value is None:
-        return
-    if key in {"builder_optimization_level", "workspace_gib"}:
-        if float(cli_value) != float(yaml_value):
-            raise SystemExit(
-                f"FFS CLI/YAML conflict for {key}: cli={cli_value!r}, yaml={yaml_value!r}"
-            )
-    elif str(cli_value).strip().lower() != str(yaml_value).strip().lower():
-        raise SystemExit(
-            f"FFS CLI/YAML conflict for {key}: cli={cli_value!r}, yaml={yaml_value!r}"
-        )
 
 
 def _validate_camera_builder_contract(runtime: Runtime, builder: PointCloudBuilder) -> None:

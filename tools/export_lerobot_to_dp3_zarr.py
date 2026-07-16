@@ -104,6 +104,17 @@ class BuilderConfigResolution:
 
 
 @dataclass(frozen=True)
+class BuilderConfigContract:
+    """The source and output contract owned by one Builder YAML."""
+
+    path: Path
+    camera: str
+    pointcloud_mode: str
+    num_points: int
+    depth_source: str
+
+
+@dataclass(frozen=True)
 class SourceStateContract:
     schema: str
     transform: str
@@ -615,15 +626,13 @@ def default_output_zarr_path(
 
 
 def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
+    _apply_builder_config_contract(args)
     lerobot_arg = Path(args.lerobot_path).expanduser()
     if not lerobot_arg.is_absolute():
         raise ValueError("--lerobot-path must be an absolute path")
     lerobot_path = lerobot_arg.resolve()
     if not lerobot_path.exists():
         raise FileNotFoundError(f"LeRobot dataset path does not exist: {lerobot_path}")
-    if args.num_points <= 0:
-        raise ValueError("--num-points must be positive")
-
     info = _read_json(lerobot_path / "meta" / "info.json")
     source_contract = detect_source_state_contract(
         info,
@@ -692,9 +701,7 @@ def export_lerobot_to_dp3_zarr(args: argparse.Namespace) -> dict[str, Any]:
             EXPECTED_FRAMES_ATTR: frames_to_export,
             "source_total_frames": total_frames,
             "raw_depth_scale_m_per_unit": sidecar_source.depth_scale_m_per_unit(args.camera),
-            "pointcloud_builder_config_source": (
-                "provided" if args.builder_config else "generated_from_calibration"
-            ),
+            "pointcloud_builder_config_source": "provided",
             "native_depth_used_for_builder": builder_resolution.depth_source == "native_depth",
         }
     )
@@ -972,6 +979,84 @@ def _depth_source_mode(args: argparse.Namespace) -> str:
     return value
 
 
+def _read_builder_config_contract(path_value: str | Path | None) -> BuilderConfigContract:
+    """Read all point-cloud runtime choices from the explicit Builder YAML."""
+
+    if path_value is None:
+        raise ValueError("--builder-config is required; point-cloud settings come from that YAML")
+    path = Path(path_value).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Builder config does not exist: {path}")
+    raw = _read_yaml(path)
+
+    camera = raw.get("camera")
+    if not isinstance(camera, Mapping):
+        raise ValueError("Builder YAML must contain a camera mapping")
+    camera_name = str(camera.get("name", "")).strip().lower()
+    if camera_name not in CAMERA_SPECS:
+        raise ValueError(
+            f"Builder YAML camera.name must be one of {sorted(CAMERA_SPECS)}, got {camera_name!r}"
+        )
+
+    pointcloud = raw.get("pointcloud")
+    if not isinstance(pointcloud, Mapping):
+        raise ValueError("Builder YAML must contain a pointcloud mapping")
+    pointcloud_mode = str(pointcloud.get("output_format", "")).strip().lower()
+    if pointcloud_mode not in {"xyz", "xyzrgb"}:
+        raise ValueError(
+            "Builder YAML pointcloud.output_format must be 'xyz' or 'xyzrgb', "
+            f"got {pointcloud_mode!r}"
+        )
+    expected_use_rgb = pointcloud_mode == "xyzrgb"
+    if bool(pointcloud.get("use_rgb", expected_use_rgb)) != expected_use_rgb:
+        raise ValueError(
+            "Builder YAML pointcloud.use_rgb must agree with pointcloud.output_format"
+        )
+
+    sampling = raw.get("sampling")
+    if sampling is None:
+        num_points = 1024
+    elif isinstance(sampling, Mapping):
+        num_points = int(sampling.get("num_points", 1024))
+    else:
+        raise ValueError("Builder YAML sampling must be a mapping when provided")
+    if num_points <= 0:
+        raise ValueError("Builder YAML sampling.num_points must be positive")
+
+    depth_source = raw.get("depth_source")
+    if depth_source is None:
+        depth_mode = "native_depth"
+    elif isinstance(depth_source, Mapping):
+        declared_mode = str(depth_source.get("mode", "frame")).strip().lower()
+        depth_mode = "native_depth" if declared_mode == "frame" else declared_mode
+    else:
+        raise ValueError("Builder YAML depth_source must be a mapping when provided")
+    if depth_mode not in DEPTH_SOURCES:
+        raise ValueError(
+            f"Builder YAML depth_source.mode must be one of {DEPTH_SOURCES}, got {depth_mode!r}"
+        )
+
+    return BuilderConfigContract(
+        path=path,
+        camera=camera_name,
+        pointcloud_mode=pointcloud_mode,
+        num_points=num_points,
+        depth_source=depth_mode,
+    )
+
+
+def _apply_builder_config_contract(args: argparse.Namespace) -> BuilderConfigContract:
+    """Populate internal call fields from the only authoritative Builder YAML."""
+
+    contract = _read_builder_config_contract(getattr(args, "builder_config", None))
+    args.builder_config = str(contract.path)
+    args.camera = contract.camera
+    args.pointcloud_mode = contract.pointcloud_mode
+    args.num_points = contract.num_points
+    args.depth_source = contract.depth_source
+    return contract
+
+
 def _resolve_builder_config(
     *,
     args: argparse.Namespace,
@@ -994,65 +1079,17 @@ def _resolve_builder_config_for_export(
     output_zarr: Path,
     realsense_calibration: dict[str, Any],
 ) -> BuilderConfigResolution:
+    _apply_builder_config_contract(args)
     depth_source = _depth_source_mode(args)
+    path = Path(args.builder_config).expanduser().resolve()
+    config = _read_yaml(path)
     if depth_source == "native_depth":
-        if any(
-            getattr(args, name, None) is not None
-            for name in (
-                "ffs_backend",
-                "ffs_artifact_id",
-                "ffs_precision",
-                "ffs_builder_optimization_level",
-                "ffs_workspace_gib",
-            )
-        ):
-            raise ValueError("FFS CLI options require --depth-source=ffs_stereo")
-        if args.builder_config:
-            path = Path(args.builder_config).expanduser().resolve()
-            if not path.is_file():
-                raise FileNotFoundError(f"Builder config does not exist: {path}")
-            config = _read_yaml(path)
-            declared_depth_source = config.get("depth_source")
-            if isinstance(declared_depth_source, Mapping):
-                declared_mode = str(declared_depth_source.get("mode", "")).strip().lower()
-            elif isinstance(declared_depth_source, str):
-                declared_mode = declared_depth_source.strip().lower()
-            else:
-                declared_mode = ""
-            if declared_mode == "frame":
-                # PointCloudBuilder's native-depth spelling is `frame`; the
-                # exporter CLI and provenance use the explicit public name.
-                declared_mode = "native_depth"
-            if declared_mode and declared_mode != "native_depth":
-                raise ValueError(
-                    "--depth-source=native_depth conflicts with Builder YAML "
-                    f"depth_source.mode={declared_mode!r}"
-                )
-            return BuilderConfigResolution(
-                config_path=path,
-                config=config,
-                depth_source=depth_source,
-            )
-
-        config = build_pointcloud_builder_config(
-            realsense_calibration,
-            camera=args.camera,
-            pointcloud_mode=args.pointcloud_mode,
-            num_points=args.num_points,
-        )
-        config_path = output_zarr.with_suffix(".pointcloud_builder.yaml").expanduser()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with config_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(config, handle, sort_keys=False)
         return BuilderConfigResolution(
-            config_path=config_path.resolve(),
+            config_path=path,
             config=config,
             depth_source=depth_source,
-            generated_config_path=True,
         )
 
-    if not args.builder_config:
-        raise ValueError("--depth-source=ffs_stereo requires an explicit --builder-config YAML")
     return _resolve_ffs_builder_config(
         args=args,
         output_zarr=output_zarr,
@@ -1080,58 +1117,25 @@ def _resolve_ffs_builder_config(
     if not isinstance(ffs_raw, dict):
         raise ValueError("FFS Builder YAML must contain depth_source.ffs")
 
-    backend = _resolve_ffs_option(
-        ffs_raw,
-        key="backend",
-        cli_value=getattr(args, "ffs_backend", None),
-        default=None,
-        normalizer=lambda value: str(value).strip().lower(),
-    )
+    backend = str(ffs_raw.get("backend", "")).strip().lower()
     if backend not in FFS_BACKENDS:
         raise ValueError(f"FFS backend must be one of {FFS_BACKENDS}, got {backend!r}")
     ffs_raw["backend"] = backend
-    artifact_id = _resolve_ffs_option(
-        ffs_raw,
-        key="artifact_id",
-        cli_value=getattr(args, "ffs_artifact_id", None),
-        default=None,
-        normalizer=lambda value: str(value).strip(),
-    )
+    artifact_id = str(ffs_raw.get("artifact_id", "")).strip()
     if not artifact_id:
-        raise ValueError(
-            "FFS artifact_id must be declared in depth_source.ffs or supplied with "
-            "--ffs-artifact-id"
-        )
+        raise ValueError("FFS Builder YAML must declare depth_source.ffs.artifact_id")
     ffs_raw["artifact_id"] = artifact_id
-    precision = _resolve_ffs_option(
-        ffs_raw,
-        key="precision",
-        cli_value=getattr(args, "ffs_precision", None),
-        default=FFS_DEFAULT_PRECISION,
-        normalizer=lambda value: str(value).strip().lower(),
-    )
+    precision = str(ffs_raw.get("precision", FFS_DEFAULT_PRECISION)).strip().lower()
     if precision not in {"fp16", "fp32"}:
         raise ValueError(f"FFS precision must be fp16 or fp32, got {precision!r}")
     ffs_raw["precision"] = precision
-    optimization_level = _resolve_ffs_option(
-        ffs_raw,
-        key="builder_optimization_level",
-        cli_value=getattr(args, "ffs_builder_optimization_level", None),
-        default=FFS_DEFAULT_BUILDER_OPTIMIZATION_LEVEL,
-        normalizer=lambda value: int(value),
+    optimization_level = int(
+        ffs_raw.get("builder_optimization_level", FFS_DEFAULT_BUILDER_OPTIMIZATION_LEVEL)
     )
-    optimization_level = int(optimization_level)
     if not 0 <= optimization_level <= 5:
         raise ValueError("FFS builder_optimization_level must be between 0 and 5")
     ffs_raw["builder_optimization_level"] = optimization_level
-    workspace_gib = _resolve_ffs_option(
-        ffs_raw,
-        key="workspace_gib",
-        cli_value=getattr(args, "ffs_workspace_gib", None),
-        default=FFS_DEFAULT_WORKSPACE_GIB,
-        normalizer=lambda value: float(value),
-    )
-    workspace_gib = float(workspace_gib)
+    workspace_gib = float(ffs_raw.get("workspace_gib", FFS_DEFAULT_WORKSPACE_GIB))
     if not np.isfinite(workspace_gib) or workspace_gib <= 0.0:
         raise ValueError("FFS workspace_gib must be finite and positive")
     ffs_raw["workspace_gib"] = workspace_gib
@@ -1217,28 +1221,6 @@ def _resolve_ffs_builder_config(
         ffs_provenance=ffs_provenance,
         generated_config_path=True,
     )
-
-
-def _resolve_ffs_option(
-    ffs: dict[str, Any],
-    *,
-    key: str,
-    cli_value: Any,
-    default: Any,
-    normalizer: Any,
-) -> Any:
-    yaml_value = ffs.get(key)
-    if cli_value is not None and yaml_value is not None:
-        if normalizer(cli_value) != normalizer(yaml_value):
-            raise ValueError(
-                f"FFS CLI/YAML conflict for {key}: cli={cli_value!r}, yaml={yaml_value!r}"
-            )
-    selected = cli_value if cli_value is not None else yaml_value
-    if selected is None:
-        selected = default
-    if selected is None:
-        raise ValueError(f"FFS Builder YAML is missing depth_source.ffs.{key}")
-    return normalizer(selected)
 
 
 def _resolve_ffs_declared_paths(ffs: dict[str, Any], config_dir: Path) -> None:
@@ -1373,20 +1355,18 @@ def _validate_builder_pointcloud_contract(
     if actual_mode != expected_mode:
         raise ValueError(
             f"FFS Builder pointcloud.output_format={actual_mode!r} conflicts with "
-            f"--pointcloud-mode={expected_mode!r}"
+            f"the Builder config contract={expected_mode!r}"
         )
     expected_rgb = expected_mode == "xyzrgb"
     if bool(pointcloud.get("use_rgb", expected_rgb)) != expected_rgb:
-        raise ValueError(
-            "FFS Builder pointcloud.use_rgb conflicts with --pointcloud-mode"
-        )
+        raise ValueError("FFS Builder pointcloud.use_rgb conflicts with its output_format")
     sampling = config.get("sampling")
     if isinstance(sampling, dict) and sampling.get("enabled", True):
         configured_points = sampling.get("num_points")
         if configured_points is not None and int(configured_points) != int(args.num_points):
             raise ValueError(
                 f"FFS Builder sampling.num_points={configured_points} conflicts with "
-                f"--num-points={args.num_points}"
+                f"the Builder config contract={args.num_points}"
             )
 
 
@@ -2540,7 +2520,8 @@ def _print_failure_diagnostics(args: argparse.Namespace, exc: BaseException) -> 
         file=sys.stderr,
     )
     data_paths = sorted((root / "data").glob("chunk-*/file-*.parquet"))
-    video_key = CAMERA_SPECS.get(args.camera, CAMERA_SPECS["head"])["video_key"]
+    camera = getattr(args, "camera", "head")
+    video_key = CAMERA_SPECS.get(camera, CAMERA_SPECS["head"])["video_key"]
     video_paths = sorted((root / "videos" / video_key).glob("chunk-*/file-*.mp4"))
     print(f"[export] data parquet files: {[str(p) for p in data_paths]}", file=sys.stderr)
     print(f"[export] attempted video files: {[str(p) for p in video_paths]}", file=sys.stderr)
@@ -2560,8 +2541,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-zarr",
         help=(
-            "Output DP3 zarr path. Defaults to "
-            f"{DEFAULT_OUTPUT_ROOT}/<lerobot_repo_id>_<camera>_<pointcloud-mode>"
+        "Output DP3 zarr path. Defaults to "
+            f"{DEFAULT_OUTPUT_ROOT}/<lerobot_repo_id>_<builder-config-contract>"
             "_state_abs_rot6d_v2.zarr"
         ),
     )
@@ -2579,7 +2560,6 @@ def parse_args() -> argparse.Namespace:
             f"source using {LEGACY_CONVERTER_NAME}."
         ),
     )
-    parser.add_argument("--camera", choices=sorted(CAMERA_SPECS), default="head")
     parser.add_argument(
         "--rgbd-sidecar-source",
         choices=["auto", "zarr", "parquet"],
@@ -2589,25 +2569,11 @@ def parse_args() -> argparse.Namespace:
             "meta/rgbd_sidecar.json exists; otherwise it uses legacy Parquet."
         ),
     )
-    parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default="xyz")
-    parser.add_argument("--num-points", type=int, default=1024)
-    parser.add_argument("--builder-config", help="Optional PointCloudBuilder YAML path")
     parser.add_argument(
-        "--depth-source",
-        choices=DEPTH_SOURCES,
-        default="native_depth",
-        help="Depth input for the shared PointCloudBuilder pipeline (default: native_depth)",
+        "--builder-config",
+        required=True,
+        help="PointCloudBuilder YAML; camera, point-cloud, sampling, and depth settings come from it.",
     )
-    parser.add_argument("--ffs-backend", choices=FFS_BACKENDS)
-    parser.add_argument("--ffs-artifact-id")
-    parser.add_argument("--ffs-precision", choices=("fp16", "fp32"))
-    parser.add_argument(
-        "--ffs-builder-optimization-level",
-        type=int,
-        choices=range(6),
-        metavar="0..5",
-    )
-    parser.add_argument("--ffs-workspace-gib", type=float)
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output zarr if it exists")
     parser.add_argument("--max-frames", type=int, help="Only convert the first N frames")
     parser.add_argument("--save-img", action="store_true", help="Also save RGB frames to data/img")
@@ -2615,21 +2581,6 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.max_frames is not None and args.max_frames <= 0:
         parser.error("--max-frames must be positive")
-    if args.ffs_workspace_gib is not None and (
-        not np.isfinite(args.ffs_workspace_gib) or args.ffs_workspace_gib <= 0.0
-    ):
-        parser.error("--ffs-workspace-gib must be finite and positive")
-    if args.depth_source == "native_depth" and any(
-        value is not None
-        for value in (
-            args.ffs_backend,
-            args.ffs_artifact_id,
-            args.ffs_precision,
-            args.ffs_builder_optimization_level,
-            args.ffs_workspace_gib,
-        )
-    ):
-        parser.error("FFS options require --depth-source ffs_stereo")
     return args
 
 

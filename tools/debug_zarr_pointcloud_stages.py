@@ -32,45 +32,22 @@ def parse_args() -> argparse.Namespace:
         "--lerobot-path",
         help="Override source_lerobot_path stored in zarr attrs.",
     )
-    parser.add_argument("--camera", choices=sorted(lerobot_debug.exporter.CAMERA_SPECS), default=None)
     parser.add_argument(
         "--rgbd-sidecar-source",
         choices=["auto", "zarr", "parquet"],
         default=None,
         help="Override source layout stored in DP3 attrs.",
     )
-    parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default=None)
-    parser.add_argument("--num-points", type=int, default=None)
     parser.add_argument("--builder-config", help="Override PointCloudBuilder YAML path.")
-    parser.add_argument(
-        "--depth-source",
-        choices=lerobot_debug.exporter.DEPTH_SOURCES,
-        default=None,
-        help="Override depth source stored in DP3 attrs.",
-    )
-    parser.add_argument("--ffs-backend", choices=lerobot_debug.exporter.FFS_BACKENDS)
-    parser.add_argument("--ffs-artifact-id")
-    parser.add_argument("--ffs-precision", choices=("fp16", "fp32"))
-    parser.add_argument(
-        "--ffs-builder-optimization-level",
-        type=int,
-        choices=range(6),
-        metavar="0..5",
-    )
-    parser.add_argument("--ffs-workspace-gib", type=float)
     parser.add_argument("--window-width", type=int, default=1800)
     parser.add_argument("--window-height", type=int, default=760)
     parser.add_argument("--point-size", type=float, default=2.0)
     parser.add_argument("--no-show", action="store_true", help="Process and print stats without Open3D GUI.")
     args = parser.parse_args()
-    if args.num_points is not None and args.num_points <= 0:
-        parser.error("--num-points must be positive")
     if args.window_width <= 0 or args.window_height <= 0:
         parser.error("--window-width and --window-height must be positive")
     if args.point_size <= 0:
         parser.error("--point-size must be positive")
-    if args.ffs_workspace_gib is not None and args.ffs_workspace_gib <= 0:
-        parser.error("--ffs-workspace-gib must be positive")
     return args
 
 
@@ -91,59 +68,23 @@ def _lerobot_args_from_zarr_attrs(
     if not lerobot_path:
         raise ValueError("zarr attrs do not contain source_lerobot_path; pass --lerobot-path")
 
-    camera = args.camera or attrs.get("camera") or "head"
-    pointcloud_mode = args.pointcloud_mode or attrs.get("pointcloud_mode") or "xyz"
-    num_points = int(args.num_points or attrs.get("num_points") or 1024)
     builder_config = _resolve_builder_config(args, attrs, tmp_dir)
+    if builder_config is None:
+        raise ValueError("No Builder config available in the zarr attrs; pass --builder-config")
     rgbd_sidecar_source = args.rgbd_sidecar_source or _source_selection_from_attrs(attrs)
-    depth_source = args.depth_source or attrs.get("depth_source") or "native_depth"
-    if depth_source not in lerobot_debug.exporter.DEPTH_SOURCES:
-        raise ValueError(f"Unsupported depth_source: {depth_source!r}")
-    ffs_backend = args.ffs_backend or attrs.get("ffs_backend")
-    ffs_artifact_id = args.ffs_artifact_id or attrs.get("artifact_id")
-    ffs_precision = args.ffs_precision or attrs.get("precision")
-    ffs_builder_optimization_level = (
-        args.ffs_builder_optimization_level
-        if args.ffs_builder_optimization_level is not None
-        else attrs.get("builder_optimization_level")
-    )
-    ffs_workspace_gib = (
-        args.ffs_workspace_gib
-        if args.ffs_workspace_gib is not None
-        else attrs.get("workspace_gib")
-    )
-    if depth_source == "native_depth" and any(
-        value is not None
-        for value in (
-            ffs_backend,
-            ffs_artifact_id,
-            ffs_precision,
-            ffs_builder_optimization_level,
-            ffs_workspace_gib,
-        )
-    ):
-        raise ValueError("FFS options require --depth-source=ffs_stereo")
-
-    return argparse.Namespace(
+    resolved = argparse.Namespace(
         lerobot_path=lerobot_path,
         frame_index=args.frame_index,
-        camera=camera,
         rgbd_sidecar_source=rgbd_sidecar_source,
-        pointcloud_mode=pointcloud_mode,
-        num_points=num_points,
         builder_config=builder_config,
-        depth_source=depth_source,
-        ffs_backend=ffs_backend,
-        ffs_artifact_id=ffs_artifact_id,
-        ffs_precision=ffs_precision,
-        ffs_builder_optimization_level=ffs_builder_optimization_level,
-        ffs_workspace_gib=ffs_workspace_gib,
         window_width=args.window_width,
         window_height=args.window_height,
         point_size=args.point_size,
         no_show=args.no_show,
         dp3_zarr=args.dp3_zarr,
     )
+    lerobot_debug.exporter._apply_builder_config_contract(resolved)
+    return resolved
 
 
 def _source_selection_from_attrs(attrs: dict[str, Any]) -> str:
