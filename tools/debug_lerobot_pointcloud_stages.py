@@ -49,6 +49,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pointcloud-mode", choices=["xyz", "xyzrgb"], default="xyz")
     parser.add_argument("--num-points", type=int, default=1024)
     parser.add_argument("--builder-config", help="Optional PointCloudBuilder YAML path.")
+    parser.add_argument(
+        "--depth-source",
+        choices=exporter.DEPTH_SOURCES,
+        default="native_depth",
+        help="Depth input for the shared PointCloudBuilder path (default: native_depth).",
+    )
+    parser.add_argument("--ffs-backend", choices=exporter.FFS_BACKENDS)
+    parser.add_argument("--ffs-artifact-id")
+    parser.add_argument("--ffs-precision", choices=("fp16", "fp32"))
+    parser.add_argument(
+        "--ffs-builder-optimization-level",
+        type=int,
+        choices=range(6),
+        metavar="0..5",
+    )
+    parser.add_argument("--ffs-workspace-gib", type=float)
     parser.add_argument("--window-width", type=int, default=1800)
     parser.add_argument("--window-height", type=int, default=760)
     parser.add_argument("--point-size", type=float, default=2.0)
@@ -60,6 +76,21 @@ def parse_args() -> argparse.Namespace:
         parser.error("--window-width and --window-height must be positive")
     if args.point_size <= 0:
         parser.error("--point-size must be positive")
+    if args.ffs_workspace_gib is not None and args.ffs_workspace_gib <= 0:
+        parser.error("--ffs-workspace-gib must be positive")
+    if args.depth_source == "ffs_stereo" and args.builder_config is None:
+        parser.error("--depth-source=ffs_stereo requires --builder-config")
+    if args.depth_source == "native_depth" and any(
+        value is not None
+        for value in (
+            args.ffs_backend,
+            args.ffs_artifact_id,
+            args.ffs_precision,
+            args.ffs_builder_optimization_level,
+            args.ffs_workspace_gib,
+        )
+    ):
+        parser.error("FFS options require --depth-source=ffs_stereo")
     return args
 
 
@@ -95,8 +126,15 @@ class DebugInputs(argparse.Namespace):
     pointcloud_mode: str
     num_points: int
     builder_config: str | None
+    depth_source: str
+    ffs_backend: str | None
+    ffs_artifact_id: str | None
+    ffs_precision: str | None
+    ffs_builder_optimization_level: int | None
+    ffs_workspace_gib: float | None
     dp3_zarr: Path | None
     temp_config_path: Path | None
+    debug_output_path: Path
 
 
 def _resolve_debug_inputs(args: argparse.Namespace, tmp_dir: Path) -> DebugInputs:
@@ -130,9 +168,16 @@ def _resolve_debug_inputs(args: argparse.Namespace, tmp_dir: Path) -> DebugInput
     resolved.pointcloud_mode = pointcloud_mode
     resolved.num_points = num_points
     resolved.builder_config = builder_config
+    resolved.depth_source = getattr(args, "depth_source", "native_depth")
+    resolved.ffs_backend = getattr(args, "ffs_backend", None)
+    resolved.ffs_artifact_id = getattr(args, "ffs_artifact_id", None)
+    resolved.ffs_precision = getattr(args, "ffs_precision", None)
+    resolved.ffs_builder_optimization_level = getattr(args, "ffs_builder_optimization_level", None)
+    resolved.ffs_workspace_gib = getattr(args, "ffs_workspace_gib", None)
     dp3_zarr = getattr(args, "dp3_zarr", None)
     resolved.dp3_zarr = Path(dp3_zarr).expanduser().resolve() if dp3_zarr else None
     resolved.temp_config_path = temp_config_path
+    resolved.debug_output_path = tmp_dir / "pointcloud_debug.zarr"
     return resolved
 
 
@@ -155,10 +200,13 @@ def _build_frame_stages(
     )
     source.validate_join(data_paths, camera=args.camera)
     realsense_calibration = source.calibration
-    builder_config_path, builder_config = _resolve_builder_config_for_debug(
+    builder_resolution = _resolve_builder_resolution_for_debug(
         args=args,
         realsense_calibration=realsense_calibration,
     )
+    builder_config_path = builder_resolution.config_path
+    builder_config = builder_resolution.config
+    depth_source = builder_resolution.depth_source
 
     PointCloudBuilder = exporter._import_pointcloud_builder()
     builder = PointCloudBuilder.from_yaml(builder_config_path)
@@ -178,16 +226,17 @@ def _build_frame_stages(
         camera=args.camera,
         row_index=args.frame_index,
         columns=columns,
+        include_ir=depth_source == "ffs_stereo",
     )
     row = source_frame.row
     source_path = source_frame.source_path
-    depth = source_frame.depth
-
-    frame: dict[str, Any] = {
-        "depth": depth,
-        "timestamp": row[camera_spec["timestamp_column"]],
-        "global_frame_index": row["global_frame_index"],
-    }
+    frame: dict[str, Any] = exporter._builder_frame_from_source_frame(
+        source_frame,
+        camera=args.camera,
+        depth_source=depth_source,
+        timestamp_column=camera_spec["timestamp_column"],
+        rgb=None,
+    )
     if need_rgb:
         video_paths = exporter._video_paths(args.lerobot_path, camera_spec["video_key"])
         frame["rgb"] = _read_rgb_at_index(video_paths, frame_index=args.frame_index)
@@ -203,7 +252,28 @@ def _build_frame_stages(
     row["_source_sidecar_path"] = source.provenance["source_sidecar_path"]
     row["_source_manifest_path"] = source.provenance["source_sidecar_manifest_path"]
     row["_builder_config"] = builder_config
+    row["_depth_source"] = depth_source
+    if builder_resolution.ffs_provenance is not None:
+        row["_ffs_provenance"] = exporter._flatten_ffs_provenance(
+            builder_resolution.ffs_provenance
+        )
     return stages, meta, row, builder_config_path
+
+
+def _resolve_builder_resolution_for_debug(
+    *,
+    args: DebugInputs,
+    realsense_calibration: dict[str, Any],
+) -> exporter.BuilderConfigResolution:
+    return exporter._resolve_builder_config_for_export(
+        args=args,
+        output_zarr=getattr(
+            args,
+            "debug_output_path",
+            (args.temp_config_path or args.lerobot_path / "pointcloud_debug.zarr"),
+        ),
+        realsense_calibration=realsense_calibration,
+    )
 
 
 def _resolve_builder_config_for_debug(
@@ -211,23 +281,13 @@ def _resolve_builder_config_for_debug(
     args: DebugInputs,
     realsense_calibration: dict[str, Any],
 ) -> tuple[Path, dict[str, Any]]:
-    if args.builder_config:
-        path = Path(args.builder_config).expanduser().resolve()
-        if not path.exists():
-            raise FileNotFoundError(f"Builder config does not exist: {path}")
-        return path, exporter._read_yaml(path)
+    """Backward-compatible tuple wrapper for callers using the old helper."""
 
-    config = exporter.build_pointcloud_builder_config(
-        realsense_calibration,
-        camera=args.camera,
-        pointcloud_mode=args.pointcloud_mode,
-        num_points=args.num_points,
+    resolution = _resolve_builder_resolution_for_debug(
+        args=args,
+        realsense_calibration=realsense_calibration,
     )
-    if args.temp_config_path is None:
-        raise RuntimeError("Internal error: temp_config_path was not prepared")
-    config_path = args.temp_config_path
-    _write_yaml(config_path, config)
-    return config_path.resolve(), config
+    return resolution.config_path, resolution.config
 
 
 def _read_row_at_index(
@@ -386,6 +446,21 @@ def _print_summary(
     print(f"  camera: {args.camera}")
     print(f"  pointcloud_mode: {args.pointcloud_mode}")
     print(f"  num_points: {args.num_points}")
+    print(f"  depth_source: {row.get('_depth_source', 'native_depth')}")
+    ffs_provenance = row.get("_ffs_provenance")
+    if isinstance(ffs_provenance, dict):
+        for key in (
+            "ffs_backend",
+            "artifact_id",
+            "precision",
+            "max_disp",
+            "valid_iters",
+            "calibration_sha256",
+            "ffs_manifest_sha256",
+            "ffs_builder_resolved_config_sha256",
+        ):
+            if key in ffs_provenance:
+                print(f"  {key}: {ffs_provenance[key]}")
     print(f"  builder_config_path: {builder_config_path}")
     print(f"  crop_enabled: {meta.get('crop_enabled')}")
     print(f"  crop_range: {meta.get('crop_range')}")

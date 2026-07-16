@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
 import json
 import logging
@@ -26,6 +27,7 @@ from omegaconf import OmegaConf
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DP3_ROOT = REPO_ROOT / "3D-Diffusion-Policy"
 POINTCLOUD_BUILDER_ROOT = REPO_ROOT / "PointCloudBuilder"
+TOOLS_DIR = Path(__file__).resolve().parent
 FLEXIV_INTERFACE_DIR = (
     REPO_ROOT / "third_party" / "real" / "dual_flexiv_rizon4s" / "interface"
 )
@@ -34,7 +36,10 @@ DEFAULT_CONFIG = DP3_ROOT / "diffusion_policy_3d/config/dp3_inference_config.yam
 for path in (REPO_ROOT, DP3_ROOT, POINTCLOUD_BUILDER_ROOT):
     if path.exists():
         sys.path.insert(0, str(path))
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
+import export_lerobot_to_dp3_zarr as exporter  # noqa: E402
 from pointcloud_builder import PointCloudBuilder  # noqa: E402
 from pointcloud_builder.config import load_config as load_pointcloud_config  # noqa: E402
 from tools.flexiv_dp3_live_viewer import (  # noqa: E402
@@ -65,6 +70,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-valid-depth-ratio-range", type=float, default=None)
     parser.add_argument("--camera-timeout-ms", type=int, default=None)
     parser.add_argument("--pointcloud-device", default=None)
+    parser.add_argument(
+        "--builder-config",
+        type=Path,
+        default=None,
+        help="Override pointcloud.config with an explicit PointCloudBuilder YAML.",
+    )
+    parser.add_argument(
+        "--depth-source",
+        choices=exporter.DEPTH_SOURCES,
+        default="native_depth",
+        help="Depth input for PointCloudBuilder (default: native_depth).",
+    )
+    parser.add_argument("--ffs-backend", choices=exporter.FFS_BACKENDS)
+    parser.add_argument("--ffs-artifact-id")
+    parser.add_argument("--ffs-precision", choices=("fp16", "fp32"))
+    parser.add_argument(
+        "--ffs-builder-optimization-level",
+        type=int,
+        choices=range(6),
+        metavar="0..5",
+    )
+    parser.add_argument("--ffs-workspace-gib", type=float)
     parser.add_argument("--log-dir", type=Path, default=REPO_ROOT / "logs")
     parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument(
@@ -100,6 +127,19 @@ def _validate_cli_args(args: argparse.Namespace) -> None:
             raise SystemExit(f"--{name.replace('_', '-')} must be in [0, 1]")
     if args.viewer_rate_hz is not None and float(args.viewer_rate_hz) <= 0.0:
         raise SystemExit("--viewer-rate-hz must be positive")
+    if args.ffs_workspace_gib is not None and args.ffs_workspace_gib <= 0:
+        raise SystemExit("--ffs-workspace-gib must be positive")
+    if args.depth_source == "native_depth" and any(
+        value is not None
+        for value in (
+            args.ffs_backend,
+            args.ffs_artifact_id,
+            args.ffs_precision,
+            args.ffs_builder_optimization_level,
+            args.ffs_workspace_gib,
+        )
+    ):
+        raise SystemExit("FFS options require --depth-source=ffs_stereo")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -121,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[perception-only] camera serial: {runtime.camera_serial}")
     print(f"[perception-only] config: {runtime.config_path}")
     print(f"[perception-only] pointcloud config: {runtime.pointcloud_config_path}")
+    print(f"[perception-only] depth source: {runtime.depth_source}")
     print(f"[perception-only] log: {log_path}")
 
     records: list[dict[str, Any]] = []
@@ -249,10 +290,17 @@ def _load_runtime(args: argparse.Namespace) -> Runtime:
         if args.viewer_rate_hz is not None
         else float(visualization_section.get("rate_hz", 2.0))
     )
+    pointcloud_config_path = (
+        args.builder_config.expanduser().resolve()
+        if args.builder_config is not None
+        else _resolve_path(pointcloud_section["config"])
+    )
+    depth_source = _resolve_live_depth_source(args, pointcloud_config_path)
     return Runtime(
         config_path=config_path,
         robot_config_path=robot_config_path,
-        pointcloud_config_path=_resolve_path(pointcloud_section["config"]),
+        pointcloud_config_path=pointcloud_config_path,
+        depth_source=depth_source,
         pointcloud_device=args.pointcloud_device or pointcloud_section.get("device", "auto"),
         camera_serial=camera_serial,
         camera_fps=int(robot_section.get("camera_fps", 30)),
@@ -288,7 +336,7 @@ def _make_camera(runtime: Runtime) -> Any:
             height=runtime.camera_height,
             color_mode=camera_mod.ColorMode.RGB,
             use_depth=True,
-            use_ir=False,
+            use_ir=getattr(runtime, "depth_source", "native_depth") == "ffs_stereo",
             rotation=camera_mod.Cv2Rotation.NO_ROTATION,
         )
     )
@@ -307,6 +355,116 @@ def _make_builder(runtime: Runtime) -> PointCloudBuilder:
     config = load_pointcloud_config(runtime.pointcloud_config_path)
     config = replace(config, device=str(runtime.pointcloud_device))
     return PointCloudBuilder(config)
+
+
+def _resolve_live_depth_source(args: argparse.Namespace, builder_path: Path) -> str:
+    """Validate the live Builder YAML without changing the file on disk."""
+
+    raw = exporter._read_yaml(builder_path)
+    declared = raw.get("depth_source")
+    if isinstance(declared, Mapping):
+        declared_mode = str(declared.get("mode", "")).strip().lower()
+    elif isinstance(declared, str):
+        declared_mode = declared.strip().lower()
+    else:
+        declared_mode = ""
+    if declared_mode == "frame":
+        declared_mode = "native_depth"
+    if declared_mode and declared_mode not in exporter.DEPTH_SOURCES:
+        raise SystemExit(f"Unsupported Builder depth_source.mode={declared_mode!r}")
+    if declared_mode and declared_mode != args.depth_source:
+        raise SystemExit(
+            f"--depth-source={args.depth_source!r} conflicts with Builder YAML "
+            f"depth_source.mode={declared_mode!r}"
+        )
+    if args.depth_source == "native_depth":
+        return "native_depth"
+    if args.builder_config is None:
+        raise SystemExit("--depth-source=ffs_stereo requires --builder-config")
+    if not isinstance(declared, Mapping) or not isinstance(declared.get("ffs"), Mapping):
+        raise SystemExit("FFS Builder YAML must contain depth_source.ffs")
+
+    ffs = copy.deepcopy(dict(declared["ffs"]))
+    backend = str(ffs.get("backend", "")).strip().lower()
+    if backend not in exporter.FFS_BACKENDS:
+        raise SystemExit(f"FFS Builder YAML backend must be one of {exporter.FFS_BACKENDS}")
+    artifact_id = str(ffs.get("artifact_id", "")).strip()
+    if not artifact_id:
+        raise SystemExit("FFS Builder YAML must declare depth_source.ffs.artifact_id")
+    _check_live_ffs_cli_contract(args, ffs, "backend", backend)
+    _check_live_ffs_cli_contract(args, ffs, "artifact_id", artifact_id)
+    precision = str(ffs.get("precision", exporter.FFS_DEFAULT_PRECISION)).strip().lower()
+    _check_live_ffs_cli_contract(args, ffs, "precision", precision)
+    optimization_level = int(
+        ffs.get("builder_optimization_level", exporter.FFS_DEFAULT_BUILDER_OPTIMIZATION_LEVEL)
+    )
+    _check_live_ffs_cli_contract(
+        args,
+        ffs,
+        "builder_optimization_level",
+        optimization_level,
+    )
+    workspace_gib = float(ffs.get("workspace_gib", exporter.FFS_DEFAULT_WORKSPACE_GIB))
+    _check_live_ffs_cli_contract(args, ffs, "workspace_gib", workspace_gib)
+    ffs.update(
+        {
+            "backend": backend,
+            "artifact_id": artifact_id,
+            "precision": precision,
+            "builder_optimization_level": optimization_level,
+            "workspace_gib": workspace_gib,
+            "width": int(ffs.get("width", 640)),
+            "height": int(ffs.get("height", 480)),
+            "max_disp": int(ffs.get("max_disp", exporter.FFS_DEFAULT_MAX_DISP)),
+            "valid_iters": int(ffs.get("valid_iters", exporter.FFS_DEFAULT_VALID_ITERS)),
+        }
+    )
+    if (ffs["height"], ffs["width"]) != (480, 640):
+        raise SystemExit("FFS Builder YAML must use fixed height=480,width=640")
+    if ffs["max_disp"] <= 0 or ffs["max_disp"] % 4 != 0:
+        raise SystemExit("FFS max_disp must be positive and divisible by 4")
+    if ffs["valid_iters"] <= 0:
+        raise SystemExit("FFS valid_iters must be positive")
+    exporter._resolve_ffs_declared_paths(ffs, builder_path.parent)
+    exporter._fill_ffs_artifact_defaults(ffs, builder_path.parent, backend, artifact_id)
+    exporter._resolve_ffs_declared_paths(ffs, builder_path.parent)
+    try:
+        exporter._preflight_ffs_artifacts(
+            ffs,
+            config_dir=builder_path.parent,
+            backend=backend,
+            artifact_id=artifact_id,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        raise SystemExit(f"FFS live artifact preflight failed: {exc}") from exc
+    return "ffs_stereo"
+
+
+def _check_live_ffs_cli_contract(
+    args: argparse.Namespace,
+    ffs: Mapping[str, Any],
+    key: str,
+    yaml_value: Any,
+) -> None:
+    cli_key = {
+        "backend": "ffs_backend",
+        "artifact_id": "ffs_artifact_id",
+        "precision": "ffs_precision",
+        "builder_optimization_level": "ffs_builder_optimization_level",
+        "workspace_gib": "ffs_workspace_gib",
+    }[key]
+    cli_value = getattr(args, cli_key, None)
+    if cli_value is None:
+        return
+    if key in {"builder_optimization_level", "workspace_gib"}:
+        if float(cli_value) != float(yaml_value):
+            raise SystemExit(
+                f"FFS CLI/YAML conflict for {key}: cli={cli_value!r}, yaml={yaml_value!r}"
+            )
+    elif str(cli_value).strip().lower() != str(yaml_value).strip().lower():
+        raise SystemExit(
+            f"FFS CLI/YAML conflict for {key}: cli={cli_value!r}, yaml={yaml_value!r}"
+        )
 
 
 def _validate_camera_builder_contract(runtime: Runtime, builder: PointCloudBuilder) -> None:
@@ -374,6 +532,7 @@ def _frame_record(
     rgb = np.asarray(frame["rgb"])
     return {
         "frame": int(index),
+        "depth_source": str(meta.get("depth_source", "native_depth")),
         "wall_time": time.time(),
         "camera_timestamp_ms": _optional_float(frame.get("timestamp")),
         "camera_frame_index": _optional_int(frame.get("frame_index")),
@@ -463,6 +622,7 @@ def _summarize_records(
         return {
             "frames": 0,
             "interrupted": interrupted,
+            "depth_source": getattr(runtime, "depth_source", "native_depth"),
             "quality_gate": {"passed": False, "failures": ["no measured frames"]},
         }
     recent = ratios[-min(runtime.stability_window, len(ratios)) :]
@@ -489,6 +649,7 @@ def _summarize_records(
     return {
         "frames": len(records),
         "interrupted": interrupted,
+        "depth_source": getattr(runtime, "depth_source", "native_depth"),
         "camera_serial": runtime.camera_serial,
         "thresholds": {
             "stability_window": runtime.stability_window,

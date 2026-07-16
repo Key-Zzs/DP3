@@ -147,10 +147,9 @@ def _validate_source_provenance(
         return None
     if storage not in {"parquet", "zarr_v2"}:
         raise ValueError(f"Unsupported source_sidecar_storage: {storage!r}")
-    if attrs.get("depth_source") != "native_depth":
-        raise ValueError(
-            f"Unsupported depth_source: {attrs.get('depth_source')!r}; expected 'native_depth'"
-        )
+    depth_source = attrs.get("depth_source", "native_depth")
+    if depth_source not in {"native_depth", "ffs_stereo"}:
+        raise ValueError(f"Unsupported depth_source: {depth_source!r}")
     committed_frames = int(attrs.get("source_sidecar_committed_frames", -1))
     if committed_frames < converted_frames:
         raise ValueError(
@@ -175,6 +174,33 @@ def _validate_source_provenance(
             digest = str(attrs[key])
             if len(digest) != 64:
                 raise ValueError(f"{key} must be a SHA-256 hex digest")
+    if depth_source == "native_depth":
+        if attrs.get("native_depth_used_for_builder", True) is not True:
+            raise ValueError("native_depth export must declare native_depth_used_for_builder=true")
+    else:
+        if attrs.get("native_depth_used_for_builder") is not False:
+            raise ValueError("FFS export must declare native_depth_used_for_builder=false")
+        required_ffs = (
+            "ffs_backend",
+            "artifact_id",
+            "precision",
+            "max_disp",
+            "valid_iters",
+            "builder_optimization_level",
+            "workspace_gib",
+            "normalization_contract",
+            "calibration_sha256",
+            "ffs_manifest_sha256",
+            "ffs_builder_resolved_config",
+            "ffs_artifact_provenance",
+        )
+        missing = [key for key in required_ffs if not attrs.get(key)]
+        if missing:
+            raise ValueError(f"FFS provenance is missing attrs: {missing}")
+        for key in ("calibration_sha256", "ffs_manifest_sha256"):
+            digest = str(attrs[key])
+            if len(digest) != 64:
+                raise ValueError(f"{key} must be a SHA-256 hex digest")
     return {
         key: attrs.get(key)
         for key in (
@@ -189,6 +215,18 @@ def _validate_source_provenance(
             "source_sidecar_committed_episodes",
             "camera",
             "depth_source",
+            "ffs_backend",
+            "artifact_id",
+            "precision",
+            "max_disp",
+            "valid_iters",
+            "builder_optimization_level",
+            "workspace_gib",
+            "normalization_contract",
+            "native_depth_used_for_builder",
+            "calibration_sha256",
+            "ffs_manifest_sha256",
+            "ffs_builder_resolved_config_sha256",
             "source_sidecar_depth_units",
             "raw_depth_scale_m_per_unit",
         )

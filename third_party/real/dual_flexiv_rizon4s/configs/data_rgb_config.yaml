@@ -54,3 +54,118 @@ sampling:
   pad_mode: repeat
   deterministic: true
   seed: 42
+
+# Active native_depth + xyzrgb configuration. PointCloudBuilder spells the
+# public native_depth mode as `depth_source.mode: frame`.
+# depth_source:
+#   mode: frame
+
+# Optional FFS groups. Uncomment exactly one complete group when FFS is needed;
+# do not mix artifact fields between backends. The camera, xyzrgb, crop, and
+# sampling values above remain the data_rgb_config contract.
+#
+# 1. PyTorch reference route:
+# depth_source:
+#   mode: ffs_stereo
+#   ffs:
+#     backend: pytorch
+#     artifact_id: fp16_o3
+#     left_key: left_ir
+#     right_key: right_ir
+#     checkpoint_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/model_best_bp2_serialize.pth
+#     model_config_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/cfg.yaml
+#     manifest_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/artifact_manifest_fp16_o3.json
+#     calibration_path: null
+#     calibration_camera: head
+#     width: 640
+#     height: 480
+#     max_disp: 192
+#     valid_iters: 8
+#     precision: fp16
+#     builder_optimization_level: 3
+#     workspace_gib: 8.0
+#     baseline_m: 0.05006292834877968
+#     rectification_mode: auto
+#     remove_invisible: true
+#     min_disparity_px: 0.001
+#     min_depth_m: 0.0
+#
+# 2. TensorRT single-engine route:
+depth_source:
+  mode: ffs_stereo
+  ffs:
+    backend: tensorrt_single
+    artifact_id: fp16_o3
+    left_key: left_ir
+    right_key: right_ir
+    engine_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_single_fp16_o3.engine
+    manifest_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_single_fp16_o3.manifest.json
+    config_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_single_fp16_o3.yaml
+    calibration_path: null
+    calibration_camera: head
+    width: 640
+    height: 480
+    max_disp: 192
+    valid_iters: 8
+    precision: fp16
+    builder_optimization_level: 3
+    workspace_gib: 8.0
+    baseline_m: 0.05006292834877968
+    rectification_mode: auto
+    remove_invisible: true
+    min_disparity_px: 0.001
+    min_depth_m: 0.0
+#
+# 3. TensorRT two-stage route:
+# depth_source:
+#   mode: ffs_stereo
+#   ffs:
+#     backend: tensorrt_two_stage
+#     artifact_id: fp16_o3
+#     left_key: left_ir
+#     right_key: right_ir
+#     feature_engine_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_two_stage_feature_fp16_o3.engine
+#     post_engine_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_two_stage_post_fp16_o3.engine
+#     manifest_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_two_stage_fp16_o3.manifest.json
+#     config_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_two_stage_fp16_o3.yaml
+#     calibration_path: null
+#     calibration_camera: head
+#     width: 640
+#     height: 480
+#     max_disp: 192
+#     valid_iters: 8
+#     precision: fp16
+#     builder_optimization_level: 3
+#     workspace_gib: 8.0
+#     baseline_m: 0.05006292834877968
+#     rectification_mode: auto
+#     remove_invisible: true
+#     min_disparity_px: 0.001
+#     min_depth_m: 0.0
+#
+# 4. TensorRT plugin route:
+# depth_source:
+#   mode: ffs_stereo
+#   ffs:
+#     backend: tensorrt_plugin
+#     artifact_id: fp16_o3
+#     left_key: left_ir
+#     right_key: right_ir
+#     engine_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_plugin_fp16_o3.engine
+#     plugin_library_path: ../../../../PointCloudBuilder/ffs_reproduction/build/libffs_gwc_plugin.so
+#     manifest_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_plugin_fp16_o3.manifest.json
+#     config_path: ../../../../PointCloudBuilder/ffs_reproduction/artifacts/tensorrt_plugin_fp16_o3.yaml
+#     calibration_path: null
+#     calibration_camera: head
+#     width: 640
+#     height: 480
+#     max_disp: 192
+#     valid_iters: 8
+#     precision: fp16
+#     builder_optimization_level: 3
+#     workspace_gib: 8.0
+#     baseline_m: 0.05006292834877968
+#     rectification_mode: auto
+#     remove_invisible: true
+#     min_disparity_px: 0.001
+#     min_depth_m: 0.0

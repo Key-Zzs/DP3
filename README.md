@@ -11,8 +11,10 @@ The original upstream DP3 README is kept as `README_DP3.md`.
 - Use the shared `PointCloudBuilder` pipeline for RGB-D to point-cloud
   generation.
 - Default camera: `head`.
-- Depth source: native RealSense `uint16` depth, from either the raw Zarr
-  sidecar or legacy `sidecar.*_depth` Parquet columns.
+- Depth source: explicit `--depth-source native_depth|ffs_stereo`, defaulting to
+  `native_depth` for backward-compatible commands. `native_depth` uses recorded
+  RealSense `uint16` depth; `ffs_stereo` uses the recorded left/right IR pair
+  and the existing PointCloudBuilder FFS backend.
 - Alignment: no `rs.align`; generated configs set
   `camera.aligned_depth_to_color: false`.
 - `xyz` mode: deprojects native depth with depth intrinsics.
@@ -21,7 +23,9 @@ The original upstream DP3 README is kept as `README_DP3.md`.
 - Output point cloud frame: selected camera/depth frame.
 - No three-view fusion.
 - No world-frame or robot-base transform.
-- No FFS, FoundationStereo, stereo rectification, or stereo-derived depth.
+- FFS depth is metric depth produced by PointCloudBuilder after its validated
+  calibration/rectification contract; the exporter does not duplicate FFS
+  inference or point-cloud geometry.
 - No Flexiv realtime control in the offline converter.
 
 Task 5 online inference should reuse the same `PointCloudBuilder` package and
@@ -73,11 +77,15 @@ native depth is read in frame chunks; a full multi-episode sidecar is not
 loaded into memory. Raw IR remains in the LeRobot sidecar and is not copied to
 the DP3 replay buffer.
 
-The reader exposes exact left/right IR pairs and calibration references for a
-future downstream pipeline, but FoundationStereo is not implemented here. A
-future `raw IR -> rectify -> disparity -> metric depth -> PointCloudBuilder`
-stage must remain separate and must not be described as supported native-depth
-export behavior.
+The reader exposes exact left/right IR pairs and calibration references. In
+`ffs_stereo` mode the exporter requests those pairs, validates their shape,
+dtype/range, timestamp, global-frame join, and calibration SHA, then passes
+`left_ir`, `right_ir`, `timestamp`, `global_frame_index`, and optional RGB to
+the same `PointCloudBuilder.from_recorded_frame()` call used by native depth.
+The native `depth` field is never passed to the FFS builder.
+
+The dedicated builder-side backend and artifact guide is
+[PointCloudBuilder FFS guide](PointCloudBuilder/ffs_reproduction/README.md).
 
 ## Default Output Path
 
@@ -103,7 +111,7 @@ Pass `--output-zarr` only when you need to override this location.
 ## Export xyz
 
 ```bash
-python tools/export_lerobot_to_dp3_zarr.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --rgbd-sidecar-source auto \
   --camera head \
@@ -116,7 +124,7 @@ python tools/export_lerobot_to_dp3_zarr.py \
 ## Export xyzrgb
 
 ```bash
-python tools/export_lerobot_to_dp3_zarr.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --rgbd-sidecar-source auto \
   --camera head \
@@ -126,10 +134,101 @@ python tools/export_lerobot_to_dp3_zarr.py \
   --overwrite
 ```
 
+## Explicit depth-source exports
+
+Complete native-depth export for the v05 dataset (the explicit legacy-state
+converter is required because this recording stores the recognized 28D source
+schema):
+
+```bash
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_3d/pick_place_20260713_v05 \
+  --rgbd-sidecar-source zarr \
+  --camera head \
+  --pointcloud-mode xyz \
+  --num-points 1024 \
+  --allow-legacy-state-conversion \
+  --depth-source native_depth \
+  --output-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260713_v05_head_xyz_native.zarr
+```
+
+One-frame FFS exports use the same dataset, `head` camera, first global frame,
+and 1024 fixed points. All four routes use the same canonical Builder config;
+before each command, comment out the active native `depth_source` block in that
+file and uncomment only the matching FFS block:
+
+```bash
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_3d/pick_place_20260713_v05 \
+  --rgbd-sidecar-source zarr --camera head --pointcloud-mode xyz --num-points 1024 --max-frames 1 \
+  --allow-legacy-state-conversion --depth-source ffs_stereo \
+  --ffs-backend pytorch --ffs-artifact-id fp16_o3 --ffs-precision fp16 \
+  --ffs-builder-optimization-level 3 --ffs-workspace-gib 8.0 \
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
+  --output-zarr outputs/ffs_export_acceptance/ffs_pytorch.zarr
+
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_3d/pick_place_20260713_v05 \
+  --rgbd-sidecar-source zarr --camera head --pointcloud-mode xyz --num-points 1024 --max-frames 1 \
+  --allow-legacy-state-conversion --depth-source ffs_stereo \
+  --ffs-backend tensorrt_single --ffs-artifact-id fp16_o3 --ffs-precision fp16 \
+  --ffs-builder-optimization-level 3 --ffs-workspace-gib 8.0 \
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
+  --output-zarr outputs/ffs_export_acceptance/ffs_tensorrt_single.zarr
+
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_3d/pick_place_20260713_v05 \
+  --rgbd-sidecar-source zarr --camera head --pointcloud-mode xyz --num-points 1024 --max-frames 1 \
+  --allow-legacy-state-conversion --depth-source ffs_stereo \
+  --ffs-backend tensorrt_two_stage --ffs-artifact-id fp16_o3 --ffs-precision fp16 \
+  --ffs-builder-optimization-level 3 --ffs-workspace-gib 8.0 \
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
+  --output-zarr outputs/ffs_export_acceptance/ffs_tensorrt_two_stage.zarr
+
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_3d/pick_place_20260713_v05 \
+  --rgbd-sidecar-source zarr --camera head --pointcloud-mode xyz --num-points 1024 --max-frames 1 \
+  --allow-legacy-state-conversion --depth-source ffs_stereo \
+  --ffs-backend tensorrt_plugin --ffs-artifact-id fp16_o3 --ffs-precision fp16 \
+  --ffs-builder-optimization-level 3 --ffs-workspace-gib 8.0 \
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
+  --output-zarr outputs/ffs_export_acceptance/ffs_tensorrt_plugin.zarr
+```
+
+FFS outputs record `depth_source=ffs_stereo`, backend/artifact contract,
+normalization, disparity settings, calibration and manifest SHA-256 values,
+portable artifact filenames/relative paths, the resolved Builder config and its
+hash, and PointCloudBuilder timing/count metadata. `native_depth_used_for_builder`
+is `false` for every FFS export. Any missing IR pair, invalid calibration,
+artifact/config/manifest hash mismatch, or backend initialization/inference
+failure aborts and removes the temporary output; FFS never silently falls back
+to native depth.
+
+Both modes use the same downstream chain:
+`depth -> PointCloudBuilder -> deprojection -> RGB mapping -> crop -> fixed-size sampling`.
+
 If `--builder-config` is omitted, the script writes a generated
 `*.pointcloud_builder.yaml` next to the output zarr. The generated config stores
 depth intrinsics, color intrinsics, depth scale, and for `xyzrgb` the
 `depth_to_color` transform.
+
+`--depth-source native_depth` keeps `--builder-config` optional, does not request
+IR sidecar columns, and does not initialize TensorRT or the FFS vendor runtime.
+`--depth-source ffs_stereo` requires an explicit FFS Builder YAML. The two
+canonical Flexiv Builder configs are:
+
+- `third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml` — native/FFS + xyz
+- `third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml` — native/FFS + xyzrgb
+
+Both files keep native depth active as `depth_source.mode: frame` and contain
+all four FFS backend groups as comments. To use FFS, comment out that active
+native block and uncomment exactly one complete FFS group. Use an IR-capable
+entrypoint such as the stage-debug tools or `run_flexiv_dp3_perception_only.py`.
+
+The exporter resolves relative artifact paths against the original YAML
+directory before writing its output-side resolved config. CLI values for
+backend, artifact id, precision, optimization level, and workspace must agree
+with the YAML; conflicts fail fast.
 
 Use `--rgbd-sidecar-source zarr` when a command must require the new raw
 sidecar, or `--rgbd-sidecar-source parquet` when it must require a legacy
@@ -145,11 +244,11 @@ interrupted export therefore cannot be mistaken for a complete training set.
 To reuse a recognized legacy Flexiv recording, require the explicit converter:
 
 ```bash
-python tools/export_lerobot_to_dp3_zarr.py \
-  --lerobot-path /absolute/path/to/legacy_lerobot \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/export_lerobot_to_dp3_zarr.py \
+  --lerobot-path ~/.cache/huggingface/lerobot/legacy_lerobot \
   --allow-legacy-state-conversion \
   --target-state-schema flexiv_abs_rot6d_v2 \
-  --output-zarr /absolute/path/to/legacy_state_abs_rot6d_v2.zarr
+  --output-zarr ~/.cache/dp3_zarr/legacy_state_abs_rot6d_v2.zarr
 ```
 
 The exporter accepts legacy data only when its exact 28D absolute-rotvec names
@@ -160,14 +259,14 @@ silently reused.
 ## Inspect zarr
 
 ```bash
-python tools/inspect_dp3_zarr.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/inspect_dp3_zarr.py \
   --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz_state_abs_rot6d_v2.zarr
 ```
 
 The inspector verifies the completion metadata and stored SHA-256 checksums,
 checks `data/state`, `data/action`, `data/point_cloud`, and
 `meta/episode_ends`, prints shapes and ranges, rejects NaN/Inf, checks that
-`episode_ends[-1] == T`, validates recorded source provenance when present, and
+`episode_ends[-1] == T`, validates recorded native-depth or FFS source provenance when present, and
 prints zarr attributes. Flexiv training performs the same completion and
 checksum checks before loading samples.
 
@@ -184,7 +283,7 @@ home directories.
 Visualize one frame from the zarr root:
 
 ```bash
-python visualizer/visualizer/visualize_zarr_pointcloud.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python visualizer/visualizer/visualize_zarr_pointcloud.py \
   --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz_state_abs_rot6d_v2.zarr \
   --frame 0
 ```
@@ -192,7 +291,7 @@ python visualizer/visualizer/visualize_zarr_pointcloud.py \
 Visualize one frame from the direct point-cloud array:
 
 ```bash
-python visualizer/visualizer/visualize_zarr_pointcloud.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python visualizer/visualizer/visualize_zarr_pointcloud.py \
   --zarr-path ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyz_state_abs_rot6d_v2.zarr/data/point_cloud \
   --frame 0
 ```
@@ -218,7 +317,7 @@ N x 6 -> xyzrgb point cloud, RGB normalized from [0,1] or [0,255]
 Use these tools when the final zarr point cloud looks wrong and you need to
 inspect the exact preprocessing stages used by `export_lerobot_to_dp3_zarr.py`.
 Both scripts rebuild one frame through the same `PointCloudBuilder` path:
-raw depth deprojection, crop, then sampling. The Open3D window shows `raw`,
+native or FFS stereo depth, deprojection, crop, then sampling. The Open3D window shows `raw`,
 `cropped`, and `sampled` point clouds side by side; each pane supports mouse
 rotate, pan, and zoom.
 
@@ -228,7 +327,7 @@ Debug a frame from an exported zarr. This reads `source_lerobot_path`,
 RGB-D frame:
 
 ```bash
-python tools/debug_zarr_pointcloud_stages.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/debug_zarr_pointcloud_stages.py \
   --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb_state_abs_rot6d_v2.zarr \
   --frame-index 0
 ```
@@ -238,7 +337,7 @@ stored inside `.zattrs`, so it reproduces the exported zarr even if the YAML fil
 on disk has changed. To test the currently edited config, pass it explicitly:
 
 ```bash
-python tools/debug_zarr_pointcloud_stages.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/debug_zarr_pointcloud_stages.py \
   --dp3-zarr ~/.cache/dp3_zarr/flexiv_dual_arm_test_pick_place_20260708_v02_head_xyzrgb_state_abs_rot6d_v2.zarr \
   --frame-index 0 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml
@@ -247,7 +346,7 @@ python tools/debug_zarr_pointcloud_stages.py \
 Debug directly from a LeRobot dataset without reading zarr attrs:
 
 ```bash
-python tools/debug_lerobot_pointcloud_stages.py \
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/debug_lerobot_pointcloud_stages.py \
   --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_test/pick_place_20260708_v02 \
   --frame-index 0 \
   --rgbd-sidecar-source auto \
@@ -256,6 +355,30 @@ python tools/debug_lerobot_pointcloud_stages.py \
   --num-points 2048 \
   --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_rgb_config.yaml
 ```
+
+Both stage-debug tools accept the same explicit depth-source contract as the
+exporter. For an FFS frame, use an explicit FFS Builder YAML; the debugger
+requests `left_ir`/`right_ir`, validates the recorded IR/calibration join, and
+passes only those IR fields to the shared builder:
+
+```bash
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/debug_lerobot_pointcloud_stages.py \
+  --lerobot-path ~/.cache/huggingface/lerobot/flexiv_dual_arm_3d/pick_place_20260713_v05 \
+  --frame-index 0 \
+  --rgbd-sidecar-source zarr \
+  --camera head \
+  --pointcloud-mode xyz \
+  --num-points 1024 \
+  --depth-source ffs_stereo \
+  --builder-config third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml \
+  --no-show
+```
+
+When the input is an FFS-derived zarr, `debug_zarr_pointcloud_stages.py`
+infers `depth_source`, backend, artifact contract, and Builder config from
+`.zattrs`; it therefore reproduces the FFS route without a native-depth
+fallback. `--depth-source` and the `--ffs-*` options can be supplied to
+override and cross-check the stored values.
 
 Add `--no-show` to print stage shapes and metadata without opening the Open3D
 GUI.
@@ -320,7 +443,7 @@ launcher:
 algorithm: simple_dp3  # simple_dp3 or dp3
 task:
   dataset:
-    zarr_path: /absolute/path/to/flexiv_head_xyz_state_abs_rot6d_v2.zarr
+    zarr_path: ~/.cache/dp3_zarr/flexiv_head_xyz_state_abs_rot6d_v2.zarr
     max_train_episodes: 90
 
 training:
@@ -429,7 +552,7 @@ Install the minimal robot-side dependencies without changing the DP3
 Torch/CUDA stack:
 
 ```bash
-python -m pip install -r third_party/real/dual_flexiv_rizon4s/requirements-runtime.txt
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python -m pip install -r third_party/real/dual_flexiv_rizon4s/requirements-runtime.txt
 ```
 
 Create a private, gitignored station configuration and replace all hardware
@@ -440,7 +563,7 @@ cp third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.example.yaml \
   third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml
 ```
 
-Set `FLEXIV_DP3_ROBOT_CONFIG=/absolute/path/to/config.yaml` to use another
+Set `FLEXIV_DP3_ROBOT_CONFIG=~/.config/flexiv_dp3/config.yaml` to use another
 private config path. Never commit real robot or camera serial numbers.
 
 Run the independent perception-only check before enabling robot motion:
@@ -462,6 +585,20 @@ perception stages, and writes per-frame JSONL plus a summary JSON under `logs/`.
 It exits with code 2 when the recent valid-depth median is below `0.75`, its
 range exceeds `0.08`, sampling pads a cloud, or a depth array does not own its
 memory. Add `--no-visualize` on a headless host.
+
+The perception-only entry point also supports the explicit FFS route. Pass a
+complete FFS Builder YAML (including live-camera intrinsics and artifact paths)
+with `--depth-source ffs_stereo`; startup enables both IR streams and performs
+the manifest/artifact preflight before opening the camera. The FFS `--ffs-*`
+options must agree with the YAML. For example:
+
+```bash
+PYTHONNOUSERSITE=1 ~/miniconda3/envs/dp3/bin/python tools/run_flexiv_dp3_perception_only.py \
+  --depth-source ffs_stereo \
+  --builder-config PointCloudBuilder/ffs_reproduction/configs/v05_ffs.yaml \
+  --frames 30 \
+  --no-visualize
+```
 
 Run the complete policy deployment with one command:
 

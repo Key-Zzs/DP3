@@ -2,15 +2,16 @@
 # flexiv_runtime.local.yaml is gitignored because station serials are private.
 
 robot:
-  left_robot_sn: "REPLACE_WITH_LEFT_ROBOT_SERIAL"
-  right_robot_sn: "REPLACE_WITH_RIGHT_ROBOT_SERIAL"
+  left_robot_sn: "Rizon4s-063173" # REPLACE_WITH_LEFT_ROBOT_SERIAL
+  right_robot_sn: "Rizon4s-063278" # REPLACE_WITH_RIGHT_ROBOT_SERIAL
   use_gripper: true
   left_gripper_name: "Flexiv-GN01"
   right_gripper_name: "Flexiv-GN01"
-  left_tool_name: "REPLACE_WITH_LEFT_TOOL_NAME"
-  right_tool_name: "REPLACE_WITH_RIGHT_TOOL_NAME"
+  left_tool_name: "Flexiv-GN01-rs" # REPLACE_WITH_LEFT_TOOL_NAME
+  right_tool_name: "Flexiv-GN01-rs" # REPLACE_WITH_RIGHT_TOOL_NAME
   switch_tool_on_connect: true
   initialize_gripper_on_connect: true
+  open_grippers_on_connect: true
   gripper_min_width: 0.0
   gripper_max_open: 0.1
   gripper_speed: 0.2
@@ -32,8 +33,8 @@ robot:
   go_home_on_connect: true
   reset_go_home: true
   home_plan_name: "PLAN-Home"
-  left_home_joints: []
-  right_home_joints: []
+  left_home_joints: [-0.17, -0.89, 0.13, 1.50, 0.85, 0.56, -0.71] # REPLACE_WITH_LEFT_HOME_JOINTS
+  right_home_joints: [0.27, -0.91, 0.06, 1.82, -1.04, 0.56, 1.17] # REPLACE_WITH_RIGHT_HOME_JOINTS
   home_joint_max_vel: 1.0
   home_joint_max_acc: 2.0
   home_joint_tolerance: 0.01
@@ -45,12 +46,15 @@ robot:
   cartesian_max_angular_vel: 1.2
   cartesian_max_linear_acc: 3.0
   cartesian_max_angular_acc: 6.0
-  left_mount_raw_deg: 0.0
+  # REPLACE_WITH_LEFT_MOUNT_DEG
+  left_mount_raw_deg: 45.0
   left_mount_pitch_deg: 0.0
   left_mount_yaw_deg: 0.0
-  right_mount_raw_deg: 0.0
+  # REPLACE_WITH_RIGHT_MOUNT_DEG
+  right_mount_raw_deg: -45.0
   right_mount_pitch_deg: 0.0
   right_mount_yaw_deg: 0.0
+
   camera_read_timeout_ms: 2000
   camera_warmup_attempts: 15
   # Discard complete RGB-D frames before publishing observations. The quality
@@ -64,7 +68,14 @@ robot:
   camera_reset_settle_sec: 6.0
   camera_reset_timeout_sec: 20.0
 
+  timing_debug: false
+  timing_debug_every_n: 1
+  timing_warn_ms: 20.0
+
 cameras:
-  head_cam_serial: "REPLACE_WITH_HEAD_REALSENSE_SERIAL"
+  # REPLACE_WITH_CAM_CONFIG
+  # left_wrist_cam_serial: "347622074728"
+  # right_wrist_cam_serial: "346522076690"
+  head_cam_serial: "344522070241"
   width: 640
   height: 480
