@@ -147,6 +147,9 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
     pointcloud = _required_mapping(cfg, "pointcloud", config_path)
     inference = _required_mapping(cfg, "inference", config_path)
     visualization = _required_mapping(cfg, "visualization", config_path)
+    control_debug = cfg.get("control_debug", {})
+    if not isinstance(control_debug, dict):
+        raise SystemExit(f"`control_debug` must be a mapping in inference config: {config_path}")
 
     rate_hz = float(inference["rate_hz"])
     duration_value = inference.get("duration_seconds")
@@ -162,6 +165,9 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
     log_dir = _resolve_repo_path(inference["log_dir"])
     run_extent = "until_stopped" if num_steps is None else f"{num_steps}step"
     summary_jsonl = log_dir / f"flexiv_dp3_inference_{point_mode}_{stamp}_{run_extent}.jsonl"
+    control_trace_jsonl = log_dir / (
+        f"flexiv_dp3_inference_{point_mode}_{stamp}_{run_extent}_control_trace.jsonl"
+    )
 
     return argparse.Namespace(
         config_path=config_path,
@@ -194,6 +200,13 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         stop_file=_resolve_repo_path(inference["stop_file"]),
         summary_jsonl=None if check_config else summary_jsonl,
         overwrite_summary_jsonl=False,
+        control_debug_enabled=bool(control_debug.get("enabled", False)),
+        control_trace_jsonl=control_trace_jsonl,
+        control_debug_feedback_hz=float(control_debug.get("feedback_hz", 50.0)),
+        control_debug_queue_size=int(control_debug.get("queue_size", 8192)),
+        control_debug_flush_interval_sec=float(
+            control_debug.get("flush_interval_sec", 1.0)
+        ),
         sampled_pointcloud_dir=None,
         sampled_pointcloud_every=1,
         visualize_live=bool(visualization["enabled"]) and not check_config,
@@ -461,6 +474,8 @@ def main() -> int:
 
     print(f"[inference] checkpoint: {_display_path(args.ckpt)}")
     print(f"[inference] log: {_display_path(args.summary_jsonl)}")
+    if args.control_debug_enabled:
+        print(f"[inference] control trace: {_display_path(args.control_trace_jsonl)}")
     duration_label = (
         "until Ctrl+C or stop file"
         if args.duration_seconds is None
@@ -537,6 +552,19 @@ def _run_config_check(
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    args.control_debug_enabled = bool(
+        getattr(args, "control_debug_enabled", False)
+    )
+    args.control_trace_jsonl = getattr(args, "control_trace_jsonl", None)
+    args.control_debug_feedback_hz = float(
+        getattr(args, "control_debug_feedback_hz", 50.0)
+    )
+    args.control_debug_queue_size = int(
+        getattr(args, "control_debug_queue_size", 8192)
+    )
+    args.control_debug_flush_interval_sec = float(
+        getattr(args, "control_debug_flush_interval_sec", 1.0)
+    )
     if args.mode != "inference":
         raise SystemExit(f"Unsupported runtime mode: {args.mode!r}")
     if args.robot_debug is not False:
@@ -569,6 +597,18 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("inference.policy_warmup_steps must be a non-negative integer")
     if args.pointcloud_warmup_steps < 0:
         raise SystemExit("inference.pointcloud_warmup_steps must be a non-negative integer")
+    args.control_debug_feedback_hz = _positive_float(
+        args.control_debug_feedback_hz,
+        label="control_debug.feedback_hz",
+    )
+    args.control_debug_queue_size = _positive_int(
+        args.control_debug_queue_size,
+        label="control_debug.queue_size",
+    )
+    args.control_debug_flush_interval_sec = _positive_float(
+        args.control_debug_flush_interval_sec,
+        label="control_debug.flush_interval_sec",
+    )
     args.max_consecutive_timing_skips = _positive_int(
         args.max_consecutive_timing_skips,
         label="inference.max_consecutive_timing_skips",
@@ -603,6 +643,19 @@ def _validate_args(args: argparse.Namespace) -> None:
             "--summary-jsonl and --stop-file must be different paths so the "
             "operator stop signal cannot collide with the audit log"
         )
+    if args.control_debug_enabled:
+        if args.control_trace_jsonl is None:
+            raise SystemExit("control_debug.enabled=true requires a control trace path")
+        if not args.check_config and Path(args.control_trace_jsonl).expanduser().exists():
+            raise SystemExit(
+                "Control trace already exists; refusing to overwrite: "
+                f"{args.control_trace_jsonl}"
+            )
+        if args.summary_jsonl is not None and _same_resolved_path(
+            args.control_trace_jsonl,
+            args.summary_jsonl,
+        ):
+            raise SystemExit("Control trace and inference audit log must use different paths")
     if args.robot_config is None:
         raise SystemExit("robot.config is required for Flexiv inference")
     if (
@@ -1133,16 +1186,47 @@ def _run_inference_loop(
                 )
                 continue
 
+            send_start: float | None = None
             try:
+                if bool(getattr(args, "control_debug_enabled", False)):
+                    set_debug_context = getattr(robot, "set_control_debug_context", None)
+                    if not callable(set_debug_context):
+                        raise RuntimeError(
+                            "control_debug.enabled=true but the Flexiv adapter does not "
+                            "provide set_control_debug_context()"
+                        )
+                    set_debug_context(
+                        {
+                            "step": int(step_idx),
+                            "chunk_index": int(queued_action.chunk_index),
+                            "chunk_size": int(queued_action.chunk_size),
+                            "predicted_chunk": bool(predicted_chunk),
+                            "queued_actions_remaining": int(len(action_queue)),
+                            "action_age_ms": float(action_age_ms),
+                            "model_raw_action14": np.asarray(
+                                raw_action,
+                                dtype=float,
+                            ).tolist(),
+                            "safety_filtered_action14": np.asarray(
+                                safe_action,
+                                dtype=float,
+                            ).tolist(),
+                        }
+                    )
                 send_start = time.monotonic()
                 robot.send_action(action_dict)
             except Exception as exc:  # noqa: BLE001
-                summary["send_duration_ms"] = (time.monotonic() - send_start) * 1000.0
+                summary["send_duration_ms"] = (
+                    None
+                    if send_start is None
+                    else (time.monotonic() - send_start) * 1000.0
+                )
                 summary["send_status"] = "send_error"
                 summary["send_error"] = str(exc)
                 _add_cycle_timing_summary(summary, step_start, period_s)
                 _write_summary(summary, summary_file)
                 raise
+            assert send_start is not None
             summary["send_duration_ms"] = (time.monotonic() - send_start) * 1000.0
             summary["send_status"] = "sent"
             consecutive_timing_safety_skips = 0
@@ -2419,6 +2503,26 @@ def _load_flexiv_config(
         "use_cartesian_servo_thread",
     ):
         set_if_supported(key, bool(getattr(args, key)))
+    set_if_supported(
+        "control_debug_enabled",
+        bool(getattr(args, "control_debug_enabled", False)),
+    )
+    set_if_supported(
+        "control_debug_log_path",
+        str(getattr(args, "control_trace_jsonl", "") or ""),
+    )
+    set_if_supported(
+        "control_debug_feedback_hz",
+        float(getattr(args, "control_debug_feedback_hz", 50.0)),
+    )
+    set_if_supported(
+        "control_debug_queue_size",
+        int(getattr(args, "control_debug_queue_size", 8192)),
+    )
+    set_if_supported(
+        "control_debug_flush_interval_sec",
+        float(getattr(args, "control_debug_flush_interval_sec", 1.0)),
+    )
     set_if_supported("read_gripper_state_in_debug", bool(args.read_gripper_state and robot_debug))
 
     head_serial = args.head_camera_serial or camera_raw.get("head_cam_serial")
@@ -2577,6 +2681,21 @@ def _config_check_summary(
         summary["num_inference_steps"] = int(args.num_inference_steps)
         summary["policy_warmup_steps"] = int(args.policy_warmup_steps)
         summary["pointcloud_warmup_steps"] = int(args.pointcloud_warmup_steps)
+        summary["control_debug"] = {
+            "enabled": bool(getattr(args, "control_debug_enabled", False)),
+            "trace_jsonl": (
+                _display_path(args.control_trace_jsonl)
+                if getattr(args, "control_trace_jsonl", None) is not None
+                else None
+            ),
+            "feedback_hz": float(
+                getattr(args, "control_debug_feedback_hz", 50.0)
+            ),
+            "queue_size": int(getattr(args, "control_debug_queue_size", 8192)),
+            "flush_interval_sec": float(
+                getattr(args, "control_debug_flush_interval_sec", 1.0)
+            ),
+        }
         summary["inference_watchdogs"] = {
             "max_policy_latency_ms": _optional_config_check_float(args.max_policy_latency_ms),
             "max_camera_frame_age_ms": _optional_config_check_float(args.max_camera_frame_age_ms),
@@ -2630,6 +2749,15 @@ def _robot_config_summary(
         ),
         "use_cartesian_servo_thread": bool(
             getattr(robot_config, "use_cartesian_servo_thread", False)
+        ),
+        "control_debug_enabled": bool(
+            getattr(robot_config, "control_debug_enabled", False)
+        ),
+        "control_debug_log_path": str(
+            getattr(robot_config, "control_debug_log_path", "")
+        ),
+        "control_debug_feedback_hz": float(
+            getattr(robot_config, "control_debug_feedback_hz", 50.0)
         ),
         "camera_hardware_reset_on_connect": bool(
             getattr(robot_config, "camera_hardware_reset_on_connect", False)

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import queue
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -39,6 +42,102 @@ ACTION_FIELD_NAMES = tuple(
     + ["left_gripper_cmd", "right_gripper_cmd"]
 )
 GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001
+CONTROL_TRACE_SCHEMA = "flexiv_control_trace_v1"
+
+
+class _AsyncControlTraceWriter:
+    """Bounded, non-blocking producer with JSON serialization off control threads."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        queue_size: int,
+        flush_interval_sec: float,
+    ) -> None:
+        self.path = Path(path).expanduser()
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=queue_size)
+        self._flush_interval_sec = float(flush_interval_sec)
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._file: Any = None
+        self._dropped_records = 0
+        self._written_records = 0
+        self._error: Exception | None = None
+
+    @property
+    def dropped_records(self) -> int:
+        return self._dropped_records
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Open synchronously so path/permission failures happen before robot motion.
+        self._file = self.path.open("x", encoding="utf-8")
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="flexiv_control_trace_writer",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def enqueue(self, record: dict[str, Any]) -> None:
+        if self._thread is None or self._stop_event.is_set():
+            return
+        try:
+            self._queue.put_nowait(record)
+        except queue.Full:
+            self._dropped_records += 1
+
+    def stop(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        self._stop_event.set()
+        thread.join(timeout=5.0)
+        if thread.is_alive():
+            logger.warning("[FLEXIV CONTROL TRACE] writer did not stop cleanly")
+        self._thread = None
+
+    def _run(self) -> None:
+        last_flush = time.monotonic()
+        try:
+            while not self._stop_event.is_set() or not self._queue.empty():
+                try:
+                    record = self._queue.get(timeout=0.1)
+                except queue.Empty:
+                    record = None
+                if record is not None:
+                    self._file.write(
+                        json.dumps(record, ensure_ascii=True, separators=(",", ":"))
+                        + "\n"
+                    )
+                    self._written_records += 1
+                now = time.monotonic()
+                if now - last_flush >= self._flush_interval_sec:
+                    self._file.flush()
+                    last_flush = now
+            footer = {
+                "event": "trace_end",
+                "schema": CONTROL_TRACE_SCHEMA,
+                "wall_time_ns": time.time_ns(),
+                "monotonic_ns": time.monotonic_ns(),
+                "written_records": self._written_records,
+                "dropped_records": self._dropped_records,
+            }
+            self._file.write(
+                json.dumps(footer, ensure_ascii=True, separators=(",", ":")) + "\n"
+            )
+            self._file.flush()
+        except Exception as exc:  # noqa: BLE001
+            self._error = exc
+            logger.exception("[FLEXIV CONTROL TRACE] writer failed")
+        finally:
+            if self._file is not None:
+                self._file.close()
+                self._file = None
 
 
 def _valid_depth_ratio(frame: Any) -> float | None:
@@ -214,6 +313,13 @@ class FlexivDualArm:
         self._global_frame_index = 0
         self._action_debug_count = 0
         self._timing_debug_counts: dict[str, int] = {}
+        self._control_trace_writer: _AsyncControlTraceWriter | None = None
+        self._control_feedback_stop_event = threading.Event()
+        self._control_feedback_thread: threading.Thread | None = None
+        self._control_action_sequence = 0
+        self._control_command_sequence = 0
+        self._control_debug_context_lock = threading.Lock()
+        self._control_debug_context: dict[str, Any] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -232,6 +338,7 @@ class FlexivDualArm:
                 "`left_robot_sn` and `right_robot_sn` in "
                 "the local Flexiv runtime config."
             )
+        self.start_control_debug_trace()
 
         try:
             import flexivrdk  # noqa: PLC0415
@@ -270,6 +377,7 @@ class FlexivDualArm:
         self._connect_cameras()
         self.is_connected = True
         self._start_cartesian_servo_thread()
+        self._start_control_feedback_thread()
         logger.info("[FLEXIV] %s connected", self.name)
 
     def _prepare_robot(self, side: str, robot: Any) -> None:
@@ -542,6 +650,9 @@ class FlexivDualArm:
             time.sleep(0.2)
 
     def disconnect(self) -> None:
+        self._stop_cartesian_servo_thread()
+        self._stop_control_feedback_thread()
+        self._stop_control_debug_trace()
         if (
             not self.is_connected
             and self._left_robot is None
@@ -552,7 +663,6 @@ class FlexivDualArm:
             and not self._connected_cameras
         ):
             return
-        self._stop_cartesian_servo_thread()
         self._stop_cameras()
         if self.config.stop_grippers_on_disconnect:
             for side, gripper in (("left", self._left_gripper), ("right", self._right_gripper)):
@@ -581,6 +691,9 @@ class FlexivDualArm:
 
     def release(self) -> None:
         """Release camera and RDK Python handles without commanding robot Stop()."""
+        self._stop_cartesian_servo_thread()
+        self._stop_control_feedback_thread()
+        self._stop_control_debug_trace()
         if (
             not self.is_connected
             and self._left_robot is None
@@ -591,7 +704,6 @@ class FlexivDualArm:
             and not self._connected_cameras
         ):
             return
-        self._stop_cartesian_servo_thread()
         self._stop_cameras()
         if self.config.camera_hardware_reset_on_release:
             self._hardware_reset_cameras("release")
@@ -614,6 +726,7 @@ class FlexivDualArm:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
         self._stop_cartesian_servo_thread()
+        self._stop_control_feedback_thread()
         if self.config.reset_go_home:
             self._execute_home_for_sides(("left", "right"))
             self._stop_arms_for_sides(("left", "right"))
@@ -627,6 +740,7 @@ class FlexivDualArm:
                 self._right_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
         self._refresh_cached_poses()
         self._start_cartesian_servo_thread()
+        self._start_control_feedback_thread()
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.is_connected:
@@ -639,11 +753,12 @@ class FlexivDualArm:
         joint_action_keys = self._joint_action_keys()
         has_cartesian_action = any(key in action for key in cartesian_action_keys)
         has_joint_action = any(key in action for key in joint_action_keys)
+        cartesian_trace: dict[str, Any] | None = None
         if not self.config.debug and has_cartesian_action:
             self._validate_action_fields(action, cartesian_action_keys)
             self._validate_cartesian_command_ready()
             cartesian_start_t = time.perf_counter()
-            self._send_cartesian_delta(action)
+            cartesian_trace = self._send_cartesian_delta(action)
             timing["cartesian_ms"] = (time.perf_counter() - cartesian_start_t) * 1000.0
         elif not self.config.debug and has_joint_action:
             self._validate_action_fields(action, joint_action_keys)
@@ -656,6 +771,8 @@ class FlexivDualArm:
             gripper_start_t = time.perf_counter()
             self._update_gripper_cache(action)
             timing["gripper_ms"] = (time.perf_counter() - gripper_start_t) * 1000.0
+        if cartesian_trace is not None:
+            self._trace_policy_action(action, cartesian_trace)
         self._log_action_debug(action)
         timing["total_ms"] = (time.perf_counter() - send_start_t) * 1000.0
         self._log_timing_debug("send_action", timing)
@@ -766,9 +883,17 @@ class FlexivDualArm:
             )
         return states
 
-    def _send_cartesian_delta(self, action: dict[str, Any]) -> None:
-        left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
-        right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+    def _send_cartesian_delta(self, action: dict[str, Any]) -> dict[str, Any]:
+        left_policy_delta = np.array(
+            [action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES],
+            dtype=float,
+        )
+        right_policy_delta = np.array(
+            [action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES],
+            dtype=float,
+        )
+        left_delta = left_policy_delta.copy()
+        right_delta = right_policy_delta.copy()
         left_delta = self._apply_mount_rotation(
             left_delta,
             self._mount_raw_deg("left"),
@@ -785,6 +910,8 @@ class FlexivDualArm:
         right_delta[:3] = _clip_norm(right_delta[:3], self.config.max_cartesian_delta)
         left_delta[3:] = _clip_norm(left_delta[3:], self.config.max_rotation_delta)
         right_delta[3:] = _clip_norm(right_delta[3:], self.config.max_rotation_delta)
+        action_wall_time_ns = time.time_ns()
+        action_monotonic_ns = time.monotonic_ns()
 
         if self.config.use_cartesian_servo_thread:
             with self._servo_lock:
@@ -794,13 +921,41 @@ class FlexivDualArm:
                 self._servo_right_target_pose7 = target_right
             self._cached_left_pose7 = target_left
             self._cached_right_pose7 = target_right
-            return
+            return {
+                "wall_time_ns": action_wall_time_ns,
+                "monotonic_ns": action_monotonic_ns,
+                "left_policy_delta": left_policy_delta,
+                "right_policy_delta": right_policy_delta,
+                "left_applied_delta": left_delta,
+                "right_applied_delta": right_delta,
+                "left_target_pose7": target_left,
+                "right_target_pose7": target_right,
+            }
 
         target_left = _apply_delta_to_pose7(self._cached_left_pose7, left_delta)
         target_right = _apply_delta_to_pose7(self._cached_right_pose7, right_delta)
+        send_start_t = time.perf_counter()
         self._send_cartesian_pose_targets(target_left, target_right)
+        send_ms = (time.perf_counter() - send_start_t) * 1000.0
+        command_wall_time_ns = time.time_ns()
+        command_monotonic_ns = time.monotonic_ns()
         self._cached_left_pose7 = target_left
         self._cached_right_pose7 = target_right
+        return {
+            "wall_time_ns": action_wall_time_ns,
+            "monotonic_ns": action_monotonic_ns,
+            "left_policy_delta": left_policy_delta,
+            "right_policy_delta": right_policy_delta,
+            "left_applied_delta": left_delta,
+            "right_applied_delta": right_delta,
+            "left_target_pose7": target_left,
+            "right_target_pose7": target_right,
+            "direct_command": {
+                "wall_time_ns": command_wall_time_ns,
+                "monotonic_ns": command_monotonic_ns,
+                "send_ms": send_ms,
+            },
+        }
 
     def _send_cartesian_pose_targets(self, target_left: np.ndarray, target_right: np.ndarray) -> None:
         zero_cartesian = [0.0] * 6
@@ -936,6 +1091,250 @@ class FlexivDualArm:
             self.config.send_arms_parallel,
         )
 
+    def start_control_debug_trace(self) -> Path | None:
+        """Open the asynchronous control trace before any hardware motion."""
+
+        if not bool(getattr(self.config, "control_debug_enabled", False)):
+            return None
+        if self._control_trace_writer is not None:
+            return self._control_trace_writer.path
+        writer = _AsyncControlTraceWriter(
+            getattr(self.config, "control_debug_log_path"),
+            queue_size=int(getattr(self.config, "control_debug_queue_size", 8192)),
+            flush_interval_sec=float(
+                getattr(self.config, "control_debug_flush_interval_sec", 1.0)
+            ),
+        )
+        writer.start()
+        self._control_trace_writer = writer
+        self._enqueue_control_trace(
+            {
+                "event": "trace_start",
+                "schema": CONTROL_TRACE_SCHEMA,
+                "wall_time_ns": time.time_ns(),
+                "monotonic_ns": time.monotonic_ns(),
+                "pose7_order": ["x", "y", "z", "qw", "qx", "qy", "qz"],
+                "delta_pose6_order": list(AXES),
+                "policy_delta_semantics": (
+                    "safety-filtered policy action before mount-frame rotation"
+                ),
+                "applied_delta_semantics": (
+                    "mount-frame rotated and adapter-clipped delta accumulated into target"
+                ),
+                "cartesian_command_mode": (
+                    "servo_thread"
+                    if self.config.use_cartesian_servo_thread
+                    else "direct_nrt"
+                ),
+                "command_pose_semantics": (
+                    "pose7 passed to Flexiv RDK SendCartesianMotionForce"
+                ),
+                "cartesian_servo_hz": float(self.config.cartesian_servo_hz),
+                "cartesian_servo_alpha": float(self.config.cartesian_servo_alpha),
+                "actual_feedback_hz": float(
+                    getattr(self.config, "control_debug_feedback_hz", 50.0)
+                ),
+            }
+        )
+        logger.info("[FLEXIV CONTROL TRACE] log=%s", writer.path)
+        return writer.path
+
+    def set_control_debug_context(self, context: dict[str, Any]) -> None:
+        """Attach inference/chunk identifiers to the next policy-action trace event."""
+
+        if self._control_trace_writer is None:
+            return
+        with self._control_debug_context_lock:
+            self._control_debug_context = dict(context)
+
+    def _take_control_debug_context(self) -> dict[str, Any]:
+        with self._control_debug_context_lock:
+            context = self._control_debug_context
+            self._control_debug_context = {}
+        return context
+
+    def _enqueue_control_trace(self, record: dict[str, Any]) -> None:
+        writer = self._control_trace_writer
+        if writer is not None:
+            writer.enqueue(record)
+
+    def _trace_policy_action(
+        self,
+        action: dict[str, Any],
+        trace: dict[str, Any],
+    ) -> None:
+        if self._control_trace_writer is None:
+            return
+        self._control_action_sequence += 1
+        record: dict[str, Any] = {
+            "event": "policy_action",
+            "schema": CONTROL_TRACE_SCHEMA,
+            "wall_time_ns": int(trace["wall_time_ns"]),
+            "monotonic_ns": int(trace["monotonic_ns"]),
+            "action_sequence": self._control_action_sequence,
+            "policy_delta_pose6": {
+                "left": trace["left_policy_delta"].tolist(),
+                "right": trace["right_policy_delta"].tolist(),
+            },
+            "applied_delta_pose6": {
+                "left": trace["left_applied_delta"].tolist(),
+                "right": trace["right_applied_delta"].tolist(),
+            },
+            "accumulated_target_pose7": {
+                "left": trace["left_target_pose7"].tolist(),
+                "right": trace["right_target_pose7"].tolist(),
+            },
+            "gripper_command": {
+                "left": float(self._left_gripper_cmd),
+                "right": float(self._right_gripper_cmd),
+            },
+        }
+        context = self._take_control_debug_context()
+        if context:
+            record["inference"] = context
+        self._enqueue_control_trace(record)
+        direct_command = trace.get("direct_command")
+        if direct_command is not None:
+            self._trace_cartesian_command(
+                left_target=trace["left_target_pose7"],
+                right_target=trace["right_target_pose7"],
+                left_command=trace["left_target_pose7"],
+                right_command=trace["right_target_pose7"],
+                command_source="direct_nrt",
+                wall_time_ns=int(direct_command["wall_time_ns"]),
+                monotonic_ns=int(direct_command["monotonic_ns"]),
+                send_ms=float(direct_command["send_ms"]),
+                loop_ms=float(direct_command["send_ms"]),
+            )
+
+    def _trace_cartesian_command(
+        self,
+        *,
+        left_target: np.ndarray,
+        right_target: np.ndarray,
+        left_command: np.ndarray,
+        right_command: np.ndarray,
+        command_source: str,
+        wall_time_ns: int,
+        monotonic_ns: int,
+        send_ms: float,
+        loop_ms: float,
+    ) -> None:
+        """Record either a servo-thread command or a direct NRT command."""
+
+        if self._control_trace_writer is None:
+            return
+        self._control_command_sequence += 1
+        command_pose7 = {
+            "left": left_command.tolist(),
+            "right": right_command.tolist(),
+        }
+        self._enqueue_control_trace(
+            {
+                # Keep the v1 event/key names so existing plotters can read both
+                # servo-thread and direct-NRT traces.
+                "event": "servo_command",
+                "schema": CONTROL_TRACE_SCHEMA,
+                "wall_time_ns": int(wall_time_ns),
+                "monotonic_ns": int(monotonic_ns),
+                "servo_sequence": self._control_command_sequence,
+                "command_sequence": self._control_command_sequence,
+                "command_source": str(command_source),
+                "accumulated_target_pose7": {
+                    "left": left_target.tolist(),
+                    "right": right_target.tolist(),
+                },
+                "command_pose7": command_pose7,
+                "smoothed_command_pose7": command_pose7,
+                "send_ms": float(send_ms),
+                "loop_ms": float(loop_ms),
+            }
+        )
+
+    def _start_control_feedback_thread(self) -> None:
+        if (
+            self._control_trace_writer is None
+            or self.config.debug
+            or self._left_robot is None
+            or self._right_robot is None
+        ):
+            return
+        if self._control_feedback_thread is not None and self._control_feedback_thread.is_alive():
+            return
+        self._control_feedback_stop_event.clear()
+        self._control_feedback_thread = threading.Thread(
+            target=self._control_feedback_loop,
+            name="flexiv_control_feedback",
+            daemon=True,
+        )
+        self._control_feedback_thread.start()
+
+    def _stop_control_feedback_thread(self) -> None:
+        self._control_feedback_stop_event.set()
+        thread = self._control_feedback_thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                logger.warning("[FLEXIV CONTROL TRACE] feedback thread did not stop cleanly")
+        self._control_feedback_thread = None
+
+    def _stop_control_debug_trace(self) -> None:
+        writer = self._control_trace_writer
+        if writer is None:
+            return
+        writer.stop()
+        if writer.dropped_records:
+            logger.warning(
+                "[FLEXIV CONTROL TRACE] dropped %d records because the queue was full",
+                writer.dropped_records,
+            )
+        else:
+            logger.info("[FLEXIV CONTROL TRACE] closed without dropped records")
+        self._control_trace_writer = None
+
+    def _control_feedback_loop(self) -> None:
+        feedback_hz = max(
+            1.0,
+            float(getattr(self.config, "control_debug_feedback_hz", 50.0)),
+        )
+        period_s = 1.0 / feedback_hz
+        count = 0
+        failures = 0
+        while not self._control_feedback_stop_event.is_set():
+            loop_start_t = time.perf_counter()
+            try:
+                with self._left_robot_lock:
+                    left_pose = _as_np(self._left_robot.states().tcp_pose, 7)
+                with self._right_robot_lock:
+                    right_pose = _as_np(self._right_robot.states().tcp_pose, 7)
+                count += 1
+                self._enqueue_control_trace(
+                    {
+                        "event": "tcp_feedback",
+                        "schema": CONTROL_TRACE_SCHEMA,
+                        "wall_time_ns": time.time_ns(),
+                        "monotonic_ns": time.monotonic_ns(),
+                        "feedback_sequence": count,
+                        "actual_tcp_pose7": {
+                            "left": left_pose.tolist(),
+                            "right": right_pose.tolist(),
+                        },
+                        "read_ms": (time.perf_counter() - loop_start_t) * 1000.0,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                if failures <= 3 or failures % 50 == 0:
+                    logger.warning(
+                        "[FLEXIV CONTROL TRACE] TCP feedback read failed (%d): %s",
+                        failures,
+                        exc,
+                    )
+            elapsed_s = time.perf_counter() - loop_start_t
+            self._control_feedback_stop_event.wait(
+                timeout=max(0.0, period_s - elapsed_s)
+            )
+
     def _reset_servo_targets_from_cached(self) -> None:
         with self._servo_lock:
             self._servo_left_target_pose7 = self._cached_left_pose7.copy()
@@ -1008,8 +1407,23 @@ class FlexivDualArm:
                 continue
 
             count += 1
-            if self.config.timing_debug:
+            total_ms = None
+            if self._control_trace_writer is not None:
                 total_ms = (time.perf_counter() - loop_start_t) * 1000.0
+                self._trace_cartesian_command(
+                    left_target=left_target,
+                    right_target=right_target,
+                    left_command=left_command,
+                    right_command=right_command,
+                    command_source="servo_thread",
+                    wall_time_ns=time.time_ns(),
+                    monotonic_ns=time.monotonic_ns(),
+                    send_ms=send_ms,
+                    loop_ms=total_ms,
+                )
+            if self.config.timing_debug:
+                if total_ms is None:
+                    total_ms = (time.perf_counter() - loop_start_t) * 1000.0
                 warn_ms = max(0.0, float(self.config.timing_warn_ms))
                 every_n = max(1, int(self.config.timing_debug_every_n) * 3)
                 if count <= 5 or count % every_n == 0 or (warn_ms > 0.0 and total_ms >= warn_ms):

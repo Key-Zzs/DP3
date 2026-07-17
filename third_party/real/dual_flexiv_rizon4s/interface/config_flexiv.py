@@ -51,6 +51,11 @@ class FlexivDualArmConfig:
     use_cartesian_servo_thread: bool = False
     cartesian_servo_hz: float = 100.0
     cartesian_servo_alpha: float = 0.35
+    control_debug_enabled: bool = False
+    control_debug_log_path: str = ""
+    control_debug_feedback_hz: float = 50.0
+    control_debug_queue_size: int = 8192
+    control_debug_flush_interval_sec: float = 1.0
 
     enable_on_connect: bool = True
     clear_fault_on_connect: bool = True
@@ -107,6 +112,20 @@ class FlexivDualArmConfig:
     go_home_rate_hz: float | None = None
 
     def __post_init__(self) -> None:
+        if self.control_debug_enabled and not str(self.control_debug_log_path).strip():
+            raise ValueError(
+                "control_debug_log_path is required when control_debug_enabled=true"
+            )
+        if float(self.control_debug_feedback_hz) <= 0.0:
+            raise ValueError("control_debug_feedback_hz must be positive")
+        if (
+            isinstance(self.control_debug_queue_size, bool)
+            or int(self.control_debug_queue_size) != self.control_debug_queue_size
+            or int(self.control_debug_queue_size) <= 0
+        ):
+            raise ValueError("control_debug_queue_size must be a positive integer")
+        if float(self.control_debug_flush_interval_sec) <= 0.0:
+            raise ValueError("control_debug_flush_interval_sec must be positive")
         for name in (
             "camera_read_timeout_ms",
             "camera_warmup_attempts",

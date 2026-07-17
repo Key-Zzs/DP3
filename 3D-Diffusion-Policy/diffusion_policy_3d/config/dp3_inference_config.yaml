@@ -106,7 +106,7 @@ robot:
   switch_tool_on_connect: true
   initialize_gripper_on_connect: true
   switch_cartesian_mode_on_connect: true
-  use_cartesian_servo_thread: true
+  use_cartesian_servo_thread: false
   camera_name: head_rgb
   camera_fps: 30
 
@@ -150,6 +150,19 @@ inference:
   # A single transient overrun skips that action chunk and immediately
   # re-predicts from a fresh observation. Repeated overruns still stop safely.
   max_consecutive_timing_skips: 3
+
+# Control-chain trace for offline jitter analysis. With the Cartesian servo
+# thread enabled it records every smoothed high-rate command; with the thread
+# disabled it records each direct NRT command (command equals accumulated
+# target). Both modes also record policy delta and actual TCP feedback into a
+# separate *_control_trace.jsonl sidecar. JSON encoding and disk writes run in a
+# background thread; control producers never block on a full queue. Actual TCP
+# feedback is sampled independently at 50 Hz to limit RDK lock contention.
+control_debug:
+  enabled: true
+  feedback_hz: 50
+  queue_size: 8192
+  flush_interval_sec: 1.0
 
 visualization:
   enabled: true
