@@ -207,6 +207,9 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         max_action_age_ms=float(inference["max_action_age_ms"]),
         max_send_duration_ms=float(inference["max_send_duration_ms"]),
         max_loop_overrun_ms=float(inference["max_loop_overrun_ms"]),
+        max_consecutive_timing_skips=int(
+            inference.get("max_consecutive_timing_skips", 3)
+        ),
         i_understand_this_moves_robot=True,
         enable_on_connect=bool(robot["enable_on_connect"]),
         clear_fault_on_connect=bool(robot["clear_fault_on_connect"]),
@@ -222,6 +225,7 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         scheduler_clip_sample=bool(cfg["policy"]["noise_scheduler"]["clip_sample"]),
         num_inference_steps=int(inference["num_inference_steps"]),
         policy_warmup_steps=int(inference.get("policy_warmup_steps", 2)),
+        pointcloud_warmup_steps=int(inference.get("pointcloud_warmup_steps", 2)),
         log_level=str(inference.get("log_level", "INFO")).upper(),
     )
 
@@ -427,6 +431,12 @@ def main() -> int:
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"Invalid PointCloudBuilder runtime contract: {exc}") from exc
     _validate_builder_contract(builder, contract, runtime_contract)
+    if not args.check_config:
+        _warmup_pointcloud_builder(
+            builder,
+            runtime_contract,
+            steps=args.pointcloud_warmup_steps,
+        )
     LOGGER.info(
         "Loaded PointCloudBuilder config=%s device=%s depth_source=%s output_format=%s "
         "points=%d ffs_backend=%s",
@@ -557,6 +567,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("inference.log_level must be DEBUG, INFO, WARNING, or ERROR")
     if args.policy_warmup_steps < 0:
         raise SystemExit("inference.policy_warmup_steps must be a non-negative integer")
+    if args.pointcloud_warmup_steps < 0:
+        raise SystemExit("inference.pointcloud_warmup_steps must be a non-negative integer")
+    args.max_consecutive_timing_skips = _positive_int(
+        args.max_consecutive_timing_skips,
+        label="inference.max_consecutive_timing_skips",
+    )
     for name in (
         "max_policy_latency_ms",
         "max_camera_frame_age_ms",
@@ -724,6 +740,7 @@ def _run_inference_loop(
         overwrite=getattr(args, "overwrite_summary_jsonl", False),
     )
     visualization = _start_live_visualization(args, builder)
+    consecutive_timing_safety_skips = 0
 
     try:
         if stop_path is not None and stop_path.exists():
@@ -763,6 +780,8 @@ def _run_inference_loop(
             camera_frame_summary = None
             predicted_chunk = False
             visualization_stages = None
+            pointcloud_build_ms = None
+            policy_predict_ms = None
 
             needs_policy_prediction = args.action_mode == "receding" or not action_queue
             if args.action_mode in {"receding", "chunk"}:
@@ -831,12 +850,14 @@ def _run_inference_loop(
                     _add_cycle_timing_summary(summary, step_start, period_s)
                     _write_summary(summary, summary_file)
                     raise RuntimeError(f"{reuse_reason} Fix camera streaming before inference.")
+                pointcloud_started = time.monotonic()
                 if visualization is None:
                     point_cloud, pc_meta = builder.from_live_frame(frame)
                 else:
                     point_cloud, pc_meta, visualization_stages = (
                         builder.from_live_frame_with_stages(frame)
                     )
+                pointcloud_build_ms = (time.monotonic() - pointcloud_started) * 1000.0
                 pc_meta = _validate_policy_pointcloud_meta(
                     pc_meta,
                     expected_num_points=contract.pointcloud_points,
@@ -864,9 +885,11 @@ def _run_inference_loop(
                         device=device,
                     )
 
+                    policy_started = time.monotonic()
                     with torch.no_grad():
                         result = policy.predict_action(policy_obs)
                     action_seq = _policy_action_sequence(result, contract)
+                    policy_predict_ms = (time.monotonic() - policy_started) * 1000.0
                     predicted_at = time.monotonic()
                     if args.action_mode == "chunk":
                         action_queue.extend(
@@ -974,6 +997,8 @@ def _run_inference_loop(
                     "padded": pc_meta.get("padded"),
                     "depth_source": runtime_contract.depth_source,
                     "ffs_backend": runtime_contract.ffs_backend,
+                    "build_ms": pointcloud_build_ms,
+                    "backend_timing_ms": _pointcloud_backend_timing_ms(pc_meta),
                     "rgbd_reused": frame_reused,
                     "rgbd_reused_by_adapter": frame_reused_by_adapter,
                     "frame_reused_by_adapter": frame_reused_by_adapter,
@@ -1037,6 +1062,7 @@ def _run_inference_loop(
                 "camera_frame": camera_frame_summary,
                 "source_camera_frame": source_camera_frame_summary,
                 "policy_latency_ms": policy_latency_ms,
+                "policy_predict_ms": policy_predict_ms,
                 "action_age_ms": action_age_ms,
                 "send_duration_ms": None,
                 "send_status": "pending",
@@ -1075,9 +1101,37 @@ def _run_inference_loop(
             except RuntimeError as exc:
                 summary["send_status"] = "skipped_timing_safety"
                 summary["send_error"] = str(exc)
+                action_queue.clear()
+                consecutive_timing_safety_skips += 1
+                summary["consecutive_timing_safety_skips"] = (
+                    consecutive_timing_safety_skips
+                )
+                summary["timing_safety_recovery"] = (
+                    "stop"
+                    if consecutive_timing_safety_skips
+                    >= args.max_consecutive_timing_skips
+                    else "repredict"
+                )
                 _add_cycle_timing_summary(summary, step_start, period_s)
                 _write_summary(summary, summary_file)
-                raise
+                if (
+                    consecutive_timing_safety_skips
+                    >= args.max_consecutive_timing_skips
+                ):
+                    raise RuntimeError(
+                        f"{exc}; reached "
+                        "inference.max_consecutive_timing_skips="
+                        f"{args.max_consecutive_timing_skips}"
+                    ) from exc
+                LOGGER.warning(
+                    "Timing safety skipped step %d (%d/%d): %s; "
+                    "discard queued chunk and re-predict from a fresh observation",
+                    step_idx,
+                    consecutive_timing_safety_skips,
+                    args.max_consecutive_timing_skips,
+                    exc,
+                )
+                continue
 
             try:
                 send_start = time.monotonic()
@@ -1091,6 +1145,7 @@ def _run_inference_loop(
                 raise
             summary["send_duration_ms"] = (time.monotonic() - send_start) * 1000.0
             summary["send_status"] = "sent"
+            consecutive_timing_safety_skips = 0
             _add_cycle_timing_summary(summary, step_start, period_s)
             runtime_safety_error = _inference_runtime_safety_error(args, summary)
             if runtime_safety_error is not None:
@@ -1168,6 +1223,62 @@ def _warmup_policy(
         latencies_ms.append((time.monotonic() - started) * 1000.0)
     print(
         "[inference] policy warmup before robot connect: "
+        + ", ".join(f"{latency:.1f} ms" for latency in latencies_ms)
+    )
+
+
+def _warmup_pointcloud_builder(
+    builder: PointCloudBuilder,
+    runtime_contract: PointCloudRuntimeContract,
+    *,
+    steps: int,
+) -> None:
+    """Initialize PointCloudBuilder and FFS CUDA kernels before robot connection."""
+
+    if steps <= 0:
+        return
+    camera = builder.camera
+    frame: dict[str, Any] = {}
+    if runtime_contract.depth_source == "ffs_stereo":
+        height = int(runtime_contract.ffs_height)
+        width = int(runtime_contract.ffs_width)
+        left_key = str(runtime_contract.ffs_left_key)
+        right_key = str(runtime_contract.ffs_right_key)
+        frame[left_key] = np.zeros((height, width), dtype=np.uint8)
+        frame[right_key] = np.zeros((height, width), dtype=np.uint8)
+    else:
+        height = int(camera.height)
+        width = int(camera.width)
+        depth_scale = float(camera.depth_scale)
+        depth_raw = max(1, int(round(0.6 / depth_scale)))
+        frame["depth"] = np.full((height, width), depth_raw, dtype=np.uint16)
+    if runtime_contract.use_rgb:
+        color = camera.color_intrinsics
+        frame["rgb"] = np.zeros(
+            (int(color.height), int(color.width), 3),
+            dtype=np.uint8,
+        )
+
+    latencies_ms: list[float] = []
+    for _ in range(steps):
+        if builder.device.type == "cuda":
+            torch.cuda.synchronize(builder.device)
+        started = time.monotonic()
+        point_cloud, _ = builder.from_live_frame(frame)
+        if builder.device.type == "cuda":
+            torch.cuda.synchronize(builder.device)
+        expected_shape = (
+            int(runtime_contract.num_points),
+            int(runtime_contract.pointcloud_dim),
+        )
+        if tuple(point_cloud.shape) != expected_shape:
+            raise RuntimeError(
+                "PointCloudBuilder warmup returned shape "
+                f"{tuple(point_cloud.shape)}, expected {expected_shape}"
+            )
+        latencies_ms.append((time.monotonic() - started) * 1000.0)
+    print(
+        "[inference] point-cloud warmup before robot connect: "
         + ", ".join(f"{latency:.1f} ms" for latency in latencies_ms)
     )
 
@@ -1635,6 +1746,21 @@ def _visualization_depth_from_observation(
     return observation[key]
 
 
+def _pointcloud_backend_timing_ms(
+    pointcloud_meta: Mapping[str, Any],
+) -> dict[str, float] | None:
+    ffs = pointcloud_meta.get("ffs")
+    if not isinstance(ffs, Mapping):
+        return None
+    timing = ffs.get("timing_ms")
+    if not isinstance(timing, Mapping):
+        return None
+    return {
+        str(key): _non_negative_float(value, label=f"pointcloud timing {key}")
+        for key, value in timing.items()
+    }
+
+
 def _policy_output_summary(queued_action: _QueuedAction, action: Any) -> dict[str, Any]:
     values = action.reshape(-1) if hasattr(action, "reshape") else torch.as_tensor(action).reshape(-1)
     return {
@@ -1898,6 +2024,18 @@ def _camera_base_name(camera_name: str) -> str:
     if camera_name.endswith("_image"):
         return camera_name.removesuffix("_image")
     return camera_name
+
+
+def _first_present_key(
+    mapping: Mapping[str, Any],
+    candidates: tuple[str, ...],
+) -> str | None:
+    """Return the first candidate key present in a mapping."""
+
+    for key in candidates:
+        if key in mapping:
+            return key
+    return None
 
 
 def _observation_rgbd_reused(observation: dict[str, Any], camera_name: str) -> bool:
@@ -2438,12 +2576,16 @@ def _config_check_summary(
         summary["scheduler_clip_sample"] = bool(args.scheduler_clip_sample)
         summary["num_inference_steps"] = int(args.num_inference_steps)
         summary["policy_warmup_steps"] = int(args.policy_warmup_steps)
+        summary["pointcloud_warmup_steps"] = int(args.pointcloud_warmup_steps)
         summary["inference_watchdogs"] = {
             "max_policy_latency_ms": _optional_config_check_float(args.max_policy_latency_ms),
             "max_camera_frame_age_ms": _optional_config_check_float(args.max_camera_frame_age_ms),
             "max_action_age_ms": _optional_config_check_float(args.max_action_age_ms),
             "max_send_duration_ms": _optional_config_check_float(args.max_send_duration_ms),
             "max_loop_overrun_ms": _optional_config_check_float(args.max_loop_overrun_ms),
+            "max_consecutive_timing_skips": int(
+                args.max_consecutive_timing_skips
+            ),
         }
     return summary
 

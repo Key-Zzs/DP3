@@ -165,6 +165,42 @@ def test_ffs_pair_shape_and_identity_mismatch_fails_fast(kind: str) -> None:
         )
 
 
+def test_ffs_accepts_small_cross_stream_timestamp_skew_and_stream_local_indices() -> None:
+    observation = _observation()
+    rgb_timestamp_ms = 1_784_271_074_134.6362
+    ir_timestamp_ms = 1_784_271_074_134.62
+    observation["head_rgbd_timestamp"] = rgb_timestamp_ms
+    observation["head_left_ir_timestamp"] = ir_timestamp_ms
+    observation["head_right_ir_timestamp"] = ir_timestamp_ms
+    observation["head_rgbd_frame_index"] = 7
+    observation["head_left_ir_frame_index"] = 42
+    observation["head_right_ir_frame_index"] = 42
+
+    frame = build_pointcloud_frame_from_observation(
+        observation,
+        camera_name="head_rgb",
+        runtime_contract=_contract(),
+    )
+
+    assert frame["left_ir_timestamp"] == ir_timestamp_ms
+    assert frame["right_ir_timestamp"] == ir_timestamp_ms
+    assert frame["frame_index"] == 7
+    assert frame["left_ir_frame_index"] == frame["right_ir_frame_index"] == 42
+
+
+def test_ffs_rejects_cross_stream_timestamp_skew_beyond_tolerance() -> None:
+    observation = _observation()
+    observation["head_left_ir_timestamp"] = 13.5
+    observation["head_right_ir_timestamp"] = 13.5
+
+    with pytest.raises(ValueError, match="does not match the RGB frame"):
+        build_pointcloud_frame_from_observation(
+            observation,
+            camera_name="head_rgb",
+            runtime_contract=_contract(),
+        )
+
+
 @pytest.mark.parametrize(
     "missing_key",
     [
@@ -199,6 +235,35 @@ def test_all_ffs_backends_share_one_builder_runtime_contract_path(backend: str) 
     assert runtime.ffs_backend == backend
     assert runtime.ffs_left_key == "left_ir"
     assert runtime.ffs_right_key == "right_ir"
+
+
+def test_ffs_pointcloud_warmup_runs_before_live_frames(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    frames: list[dict[str, object]] = []
+
+    def from_live_frame(frame: dict[str, object]):
+        frames.append(frame)
+        return np.zeros((2048, 3), dtype=np.float32), {}
+
+    builder = SimpleNamespace(
+        camera=SimpleNamespace(
+            width=W,
+            height=H,
+            depth_scale=0.001,
+            color_intrinsics=SimpleNamespace(width=W, height=H),
+        ),
+        device=SimpleNamespace(type="cpu"),
+        from_live_frame=from_live_frame,
+    )
+
+    launcher._warmup_pointcloud_builder(builder, _contract(), steps=2)
+
+    assert len(frames) == 2
+    assert frames[0]["left_ir"].shape == (H, W)
+    assert frames[0]["right_ir"].shape == (H, W)
+    assert "depth" not in frames[0]
+    assert "before robot connect" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -239,6 +304,55 @@ def test_camera_config_is_builder_driven_for_native_and_ffs() -> None:
     assert native.use_ir is False
     assert ffs.use_depth is True
     assert ffs.use_ir is True
+
+
+def test_visualization_depth_resolves_rgb_camera_sidecar_key() -> None:
+    depth = np.full((H, W), 1234, dtype=np.uint16)
+    observation = {
+        "sidecar.head_depth": depth,
+        "depth": np.zeros((H, W), dtype=np.uint16),
+    }
+
+    resolved = launcher._visualization_depth_from_observation(
+        observation,
+        camera_name="head_rgb",
+    )
+
+    assert resolved is depth
+
+
+def test_visualization_depth_falls_back_to_generic_depth_key() -> None:
+    depth = np.full((H, W), 1234, dtype=np.uint16)
+
+    resolved = launcher._visualization_depth_from_observation(
+        {"depth": depth},
+        camera_name="head_rgb",
+    )
+
+    assert resolved is depth
+
+
+def test_visualization_depth_missing_field_fails_with_actionable_error() -> None:
+    with pytest.raises(KeyError, match="save_depth_sidecar=true"):
+        launcher._visualization_depth_from_observation(
+            {},
+            camera_name="head_rgb",
+        )
+
+
+def test_pointcloud_backend_timing_is_preserved_for_runtime_diagnosis() -> None:
+    timing = launcher._pointcloud_backend_timing_ms(
+        {
+            "ffs": {
+                "timing_ms": {
+                    "inference": 10.5,
+                    "sampling": 82.25,
+                }
+            }
+        }
+    )
+
+    assert timing == {"inference": 10.5, "sampling": 82.25}
 
 
 def test_builder_camera_name_must_match_formal_flexiv_camera() -> None:
@@ -318,6 +432,7 @@ def _loader_args(robot_config: Path) -> SimpleNamespace:
         max_action_age_ms=500.0,
         max_send_duration_ms=500.0,
         max_loop_overrun_ms=250.0,
+        max_consecutive_timing_skips=3,
         rate_hz=10.0,
         duration_seconds=None,
         action_mode="chunk",
@@ -327,6 +442,7 @@ def _loader_args(robot_config: Path) -> SimpleNamespace:
         scheduler_clip_sample=True,
         num_inference_steps=10,
         policy_warmup_steps=2,
+        pointcloud_warmup_steps=2,
     )
 
 
@@ -475,11 +591,13 @@ def test_config_check_summary_reports_native_and_ffs_routes() -> None:
         scheduler_clip_sample=True,
         num_inference_steps=10,
         policy_warmup_steps=2,
+        pointcloud_warmup_steps=2,
         max_policy_latency_ms=250.0,
         max_camera_frame_age_ms=1000.0,
         max_action_age_ms=500.0,
         max_send_duration_ms=500.0,
         max_loop_overrun_ms=250.0,
+        max_consecutive_timing_skips=3,
     )
     robot_config = SimpleNamespace(
         debug=False,
@@ -515,3 +633,4 @@ def test_config_check_summary_reports_native_and_ffs_routes() -> None:
     assert summary["point_cloud"]["depth_source"] == "ffs_stereo"
     assert summary["point_cloud"]["ffs_backend"] == "pytorch"
     assert summary["artifacts"]["ffs"]["manifest_sha256"] == "a" * 64
+    assert summary["inference_watchdogs"]["max_consecutive_timing_skips"] == 3

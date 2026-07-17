@@ -118,7 +118,7 @@ inference:
   device: cuda:0
   # Run until Ctrl+C or the stop file is created.
   duration_seconds: null
-  # Execute the configured SimpleDP3 action chunk at the 15 Hz deployment rate,
+  # Execute the configured SimpleDP3 action chunk at the 10 Hz deployment rate,
   # matching Le-nero's queue semantics and the official MultiStepWrapper.
   rate_hz: 10
   action_mode: chunk # receding | chunk
@@ -129,6 +129,9 @@ inference:
   # Discarded zero-input forwards run before robot.connect() to initialize CUDA
   # kernels without sending actions and prevent first-cycle cold-start trips.
   policy_warmup_steps: 2
+  # Also discard synthetic PointCloudBuilder/FFS forwards before robot.connect().
+  # This absorbs TensorRT and point-cloud CUDA cold start outside the safety loop.
+  pointcloud_warmup_steps: 2
   log_dir: logs
   log_level: INFO
   stop_file: /tmp/stop_flexiv_dp3_inference
@@ -144,6 +147,9 @@ inference:
   max_action_age_ms: 500
   max_send_duration_ms: 500
   max_loop_overrun_ms: 250
+  # A single transient overrun skips that action chunk and immediately
+  # re-predicts from a fresh observation. Repeated overruns still stop safely.
+  max_consecutive_timing_skips: 3
 
 visualization:
   enabled: true

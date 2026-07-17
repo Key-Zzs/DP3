@@ -18,11 +18,12 @@ algorithm_profiles:
     # Match the prior LeRobot DP temporal contract and U-Net capacity while
     # keeping the lighter SimpleDP3 implementation for the 16 GB RTX 5080.
     horizon: 8
-    n_action_steps: 5
+    n_action_steps: 4
     down_dims: [512, 1024, 2048]
-    # 5199 train sequences / batch 32 = 163 steps per epoch.
+    # converted_frames in .zattrs
+    # 5199 converted_frames / batch 32 = 163 steps per epoch.
     # 245 epochs gives about 39935 optimizer steps, matching the prior DP run.
-    num_epochs: 400
+    num_epochs: 300
     lr_warmup_steps: 500
   dp3:
     policy_target: diffusion_policy_3d.policy.dp3.DP3
@@ -42,7 +43,7 @@ run_dir: 3D-Diffusion-Policy/outputs/${exp_name}_seed${training.seed}
 # defaults to xyzrgb, update this path to the corresponding XYZRGB zarr.
 task:
   dataset:
-    zarr_path: /home/deepcybo/.cache/dp3_zarr/flexiv_dual_arm_3d_pick_place_20260713_v05_head_xyz_state_abs_rot6d_v2.zarr
+    zarr_path: /home/deepcybo/.cache/dp3_zarr/pick_place_20260717_v01_head_xyz.zarr
     seed: ${training.seed}
     max_train_episodes: 50
     expected_state_dim: 34

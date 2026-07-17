@@ -49,6 +49,10 @@ FFS_BACKEND_NAMES = (
     "tensorrt_two_stage",
     "tensorrt_plugin",
 )
+# RealSense stream timestamps are expressed in milliseconds. Frames extracted
+# from one composite frameset can retain a small stream-local timestamp skew,
+# so nanosecond-level equality is not a valid coherence test.
+FFS_STREAM_TIMESTAMP_TOLERANCE_MS = 0.1
 
 
 @dataclass(frozen=True)
@@ -864,15 +868,23 @@ def _validate_ffs_pair_metadata(
             f"{base_name}_left_ir_timestamp and {base_name}_right_ir_timestamp are a pair"
         )
     if left_timestamp is not None:
-        if not np.isclose(float(left_timestamp), float(right_timestamp), rtol=0.0, atol=1e-6):
+        left_timestamp_f = float(left_timestamp)
+        right_timestamp_f = float(right_timestamp)
+        stereo_skew_ms = abs(left_timestamp_f - right_timestamp_f)
+        if stereo_skew_ms > FFS_STREAM_TIMESTAMP_TOLERANCE_MS:
             raise ValueError(
                 f"FFS stereo IR timestamp mismatch for camera {camera_name!r}: "
-                f"left={left_timestamp!r}, right={right_timestamp!r}"
+                f"left={left_timestamp!r}, right={right_timestamp!r}, "
+                f"skew_ms={stereo_skew_ms:.6g}, "
+                f"tolerance_ms={FFS_STREAM_TIMESTAMP_TOLERANCE_MS:g}"
             )
-        if not np.isclose(float(left_timestamp), float(common_timestamp), rtol=0.0, atol=1e-6):
+        rgb_skew_ms = abs(left_timestamp_f - float(common_timestamp))
+        if rgb_skew_ms > FFS_STREAM_TIMESTAMP_TOLERANCE_MS:
             raise ValueError(
                 f"FFS stereo IR timestamp does not match the RGB frame for camera {camera_name!r}: "
-                f"ir={left_timestamp!r}, rgb={common_timestamp!r}"
+                f"ir={left_timestamp!r}, rgb={common_timestamp!r}, "
+                f"skew_ms={rgb_skew_ms:.6g}, "
+                f"tolerance_ms={FFS_STREAM_TIMESTAMP_TOLERANCE_MS:g}"
             )
     left_index = frame.get("left_ir_frame_index")
     right_index = frame.get("right_ir_frame_index")
@@ -892,12 +904,9 @@ def _validate_ffs_pair_metadata(
             f"FFS stereo IR frame-index mismatch for camera {camera_name!r}: "
             f"left={left_index!r}, right={right_index!r}"
         )
-    camera_index = frame.get("frame_index")
-    if left_index is not None and camera_index is not None and int(left_index) != int(camera_index):
-        raise ValueError(
-            f"FFS stereo IR frame index does not match the RGB frame for camera {camera_name!r}: "
-            f"ir={left_index!r}, rgb={camera_index!r}"
-        )
+    # RealSense frame numbers are stream-local counters. Left/right IR counters
+    # must agree because they form the stereo pair, but comparing either counter
+    # numerically with the RGB counter can reject a coherent composite frameset.
 
 
 def prepare_point_cloud(
