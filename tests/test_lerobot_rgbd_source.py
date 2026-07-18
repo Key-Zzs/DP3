@@ -90,7 +90,14 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _make_dataset(tmp_path: Path, *, layout: str, name: str = "dataset") -> SyntheticDataset:
+def _make_dataset(
+    tmp_path: Path,
+    *,
+    layout: str,
+    name: str = "dataset",
+    source_schema: str = "v2",
+    force_scale: float = 1000.0,
+) -> SyntheticDataset:
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     zarr = pytest.importorskip("zarr")
@@ -100,6 +107,8 @@ def _make_dataset(tmp_path: Path, *, layout: str, name: str = "dataset") -> Synt
     calibration = _calibration()
     calibration_path = root / "meta/realsense_calibration.json"
     _write_json(calibration_path, calibration)
+    if source_schema not in {"v2", "v3"}:
+        raise ValueError(source_schema)
     info = {
         "repo_id": f"synthetic/{name}",
         "fps": 30,
@@ -109,12 +118,22 @@ def _make_dataset(tmp_path: Path, *, layout: str, name: str = "dataset") -> Synt
             spec["video_key"]: {"shape": [H, W, 3]}
             for spec in exporter.CAMERA_SPECS.values()
         },
-        "robot_state_schema": exporter.build_flexiv_state_schema(),
+        "robot_state_schema": (
+            exporter.build_flexiv_state_schema()
+            if source_schema == "v2"
+            else exporter.build_flexiv_raw_force_state_schema()
+        ),
     }
+    source_state_names = (
+        exporter.STATE_FIELD_NAMES
+        if source_schema == "v2"
+        else exporter.RAW_FORCE_STATE_FIELD_NAMES
+    )
+    source_state_dim = exporter.STATE_DIM if source_schema == "v2" else exporter.FLEXIV_RAW_FORCE_STATE_DIM
     info["features"][exporter.STATE_COLUMN] = {
         "dtype": "float32",
-        "shape": [exporter.STATE_DIM],
-        "names": list(exporter.STATE_FIELD_NAMES),
+        "shape": [source_state_dim],
+        "names": list(source_state_names),
     }
     info["features"][exporter.ACTION_COLUMN] = {
         "dtype": "float32",
@@ -123,13 +142,18 @@ def _make_dataset(tmp_path: Path, *, layout: str, name: str = "dataset") -> Synt
     }
     _write_json(root / "meta/info.json", info)
 
-    state = np.zeros((T, exporter.STATE_DIM), dtype=np.float32)
-    state[:, :7] = np.arange(T * 7, dtype=np.float32).reshape(T, 7)
-    state[:, 17:24] = np.arange(T * 7, dtype=np.float32).reshape(T, 7)
-    state[:, 10:16] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    state[:, 27:33] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    state[:, 16] = 0.5
-    state[:, 33] = 0.5
+    target_state = np.zeros((T, exporter.STATE_DIM), dtype=np.float32)
+    target_state[:, :7] = np.arange(T * 7, dtype=np.float32).reshape(T, 7)
+    target_state[:, 17:24] = np.arange(T * 7, dtype=np.float32).reshape(T, 7)
+    target_state[:, 10:16] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    target_state[:, 27:33] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    target_state[:, 16] = 0.5
+    target_state[:, 33] = 0.5
+    if source_schema == "v3":
+        raw_force = np.arange(T * 14, dtype=np.float32).reshape(T, 14) * float(force_scale)
+        state = np.concatenate((target_state, raw_force), axis=1)
+    else:
+        state = target_state
     action = np.arange(T * exporter.ACTION_DIM, dtype=np.float32).reshape(T, exporter.ACTION_DIM)
     index = np.arange(T, dtype=np.int64)
     episode_index = np.asarray([0, 0, 1, 1], dtype=np.int64)
@@ -596,6 +620,103 @@ def test_zarr_and_parquet_export_equivalence_and_max_frames(tmp_path) -> None:
     assert len(zarr_root.attrs["derived_state_sha256"]) == 64
     assert "left_ir" not in zarr_root["data"] and "right_ir" not in zarr_root["data"]
     assert exporter.verify_dp3_zarr(zarr_output) == zarr_root.attrs["integrity"]
+
+
+def test_v3_raw_force_export_projects_by_name_and_writes_provenance(tmp_path) -> None:
+    zarr = pytest.importorskip("zarr")
+    dataset = _make_dataset(tmp_path, layout="zarr", source_schema="v3")
+    config = _builder_config(dataset, tmp_path / "v3_builder.yaml", mode="xyz")
+    output = tmp_path / "v3_output.zarr"
+
+    summary = exporter.export_lerobot_to_dp3_zarr(
+        _export_args(dataset, output, config, source="zarr")
+    )
+    root = zarr.open(str(output), mode="r")
+    detected = exporter.detect_source_state_contract(dataset.info)
+    expected_state = dataset.state[
+        :, np.asarray(detected.target_projection_indices, dtype=np.int64)
+    ]
+    np.testing.assert_array_equal(root["data/state"][:], expected_state)
+    assert tuple(root["data/state"].shape) == (T, 34)
+    assert tuple(root["data/action"].shape) == (T, 14)
+    assert summary["state_shape"] == (T, 34)
+    assert root.attrs["source_state_schema"] == exporter.FLEXIV_RAW_FORCE_STATE_SCHEMA
+    assert root.attrs["source_state_dim"] == 48
+    assert root.attrs["source_state_names"] == list(exporter.RAW_FORCE_STATE_FIELD_NAMES)
+    assert root.attrs["state_schema"] == exporter.TARGET_STATE_SCHEMA
+    assert root.attrs["state_dim"] == 34
+    assert root.attrs["state_names"] == list(exporter.STATE_FIELD_NAMES)
+    assert root.attrs["state_transform"] == exporter.RAW_FORCE_CONVERTER_NAME
+    assert root.attrs["dropped_state_names"] == list(exporter.FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES)
+    assert root.attrs["raw_source_state_sha256"] == exporter._numpy_sha256(
+        dataset.state, dtype=np.float32
+    )
+    assert root.attrs["derived_state_sha256"] == exporter._numpy_sha256(
+        expected_state, dtype=np.float32
+    )
+    assert root.attrs["raw_source_state_sha256"] != root.attrs["derived_state_sha256"]
+    assert exporter.verify_dp3_zarr(output) == root.attrs["integrity"]
+
+    changed_dataset = _make_dataset(
+        tmp_path,
+        layout="zarr",
+        name="v3_force_changed",
+        source_schema="v3",
+        force_scale=-1e6,
+    )
+    changed_config = _builder_config(
+        changed_dataset,
+        tmp_path / "v3_changed_builder.yaml",
+        mode="xyz",
+    )
+    changed_output = tmp_path / "v3_changed_output.zarr"
+    exporter.export_lerobot_to_dp3_zarr(
+        _export_args(changed_dataset, changed_output, changed_config, source="zarr")
+    )
+    changed_root = zarr.open(str(changed_output), mode="r")
+    np.testing.assert_array_equal(root["data/state"][:], changed_root["data/state"][:])
+    assert root.attrs["derived_state_sha256"] == changed_root.attrs["derived_state_sha256"]
+    assert root.attrs["raw_source_state_sha256"] != changed_root.attrs["raw_source_state_sha256"]
+
+
+def test_rgbd_only_tools_accept_v3_state_metadata_without_reading_force_fields(tmp_path) -> None:
+    dataset = _make_dataset(tmp_path, layout="zarr", source_schema="v3")
+    source = _open(dataset)
+    source.validate_join([dataset.parquet_path], camera="head", batch_size=2)
+    frame = source.read_frame_at(
+        [dataset.parquet_path],
+        camera="head",
+        row_index=0,
+        columns=[
+            "index",
+            "episode_index",
+            "frame_index",
+            "global_frame_index",
+            "head_rgbd_timestamp",
+            "head_rgbd_reused",
+        ],
+    )
+    assert not any(name in frame.row for name in exporter.FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES)
+
+    debug_path = ROOT / "tools/debug_lerobot_pointcloud_stages.py"
+    spec = importlib.util.spec_from_file_location("debug_lerobot_pointcloud_stages_v3", debug_path)
+    debug = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(debug)
+    builder_config = _builder_config(dataset, tmp_path / "v3_debug_builder.yaml", mode="xyz")
+    args = debug.DebugInputs()
+    args.lerobot_path = dataset.root.resolve()
+    args.frame_index = 1
+    args.camera = "head"
+    args.rgbd_sidecar_source = "auto"
+    args.pointcloud_mode = "xyz"
+    args.num_points = H * W
+    args.builder_config = str(builder_config)
+    args.dp3_zarr = None
+    args.temp_config_path = builder_config
+    stages, _meta, debug_row, _config_path = debug._build_frame_stages(args)
+    assert tuple(stages["sampled"].shape) == (H * W, 3)
+    assert not any(name in debug_row for name in exporter.FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES)
 
 
 def test_zarr_native_depth_xyzrgb_export(tmp_path, monkeypatch) -> None:

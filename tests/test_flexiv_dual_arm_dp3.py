@@ -11,6 +11,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "3D-Diffusion-Policy"))
 
+from diffusion_policy_3d.common.flexiv_state_contract import (  # noqa: E402
+    FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES,
+)
 from diffusion_policy_3d.real_world.flexiv_dual_arm_dp3 import (  # noqa: E402
     ACTION_FIELD_NAMES,
     FLEXIV_ROTATION6D_CONVENTION,
@@ -225,6 +228,48 @@ def test_live_agent_pos_checks_rotation6d_and_gripper_indices() -> None:
         bad = state.copy()
         bad[10] = 0.0
         validate_agent_pos(bad)
+
+
+def test_live_agent_pos_ignores_v3_force_fields_without_changing_target_state() -> None:
+    observation = {key: 0.0 for key in STATE_FIELD_NAMES}
+    for side in ("left", "right"):
+        observation[f"{side}_ee_rotation_6d.c0x"] = 1.0
+        observation[f"{side}_ee_rotation_6d.c1y"] = 1.0
+    observation["left_gripper_state_norm"] = 0.2
+    observation["right_gripper_state_norm"] = 0.8
+    baseline = build_agent_pos(observation)
+
+    with_force = dict(observation)
+    with_force.update(
+        {
+            name: value
+            for name, value in zip(
+                FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES,
+                [
+                    1e30,
+                    -1e30,
+                    7.0,
+                    -8.0,
+                    1e-30,
+                    -1e-30,
+                    123.0,
+                    -456.0,
+                    0.0,
+                    1.0,
+                    -2.0,
+                    3.0,
+                    -4.0,
+                    5.0,
+                ],
+                strict=True,
+            )
+        }
+    )
+    np.testing.assert_array_equal(build_agent_pos(with_force), baseline)
+    with pytest.raises(KeyError, match=r"left_joint_1\.pos"):
+        missing = dict(with_force)
+        missing.pop("left_joint_1.pos")
+        build_agent_pos(missing)
 
 
 def test_action_contract_and_safety_filter_remain_14d_delta_rotvec() -> None:

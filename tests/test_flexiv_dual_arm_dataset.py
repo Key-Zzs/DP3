@@ -14,6 +14,10 @@ sys.path.insert(0, str(ROOT / "3D-Diffusion-Policy"))
 zarr = pytest.importorskip("zarr")
 
 from diffusion_policy_3d.common.flexiv_state_contract import (  # noqa: E402
+    FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES,
+    FLEXIV_RAW_FORCE_STATE_NAMES,
+    FLEXIV_RAW_FORCE_STATE_SCHEMA,
+    FLEXIV_RAW_FORCE_TO_V2_TRANSFORM,
     flexiv_action_names,
     flexiv_state_names,
 )
@@ -128,6 +132,40 @@ def test_flexiv_dataset_reads_xyz_zarr(tmp_path: Path) -> None:
     assert sample["obs"]["agent_pos"].shape == (4, FLEXIV_STATE_DIM)
     assert sample["obs"]["point_cloud"].shape == (4, 8, 3)
     assert sample["action"].shape == (4, 14)
+
+
+def test_flexiv_dataset_consumes_v3_provenance_but_normalizer_stays_34d(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "flexiv_v3_source.zarr"
+    _write_zarr(zarr_path, pc_dim=3)
+    root = zarr.open(str(zarr_path), mode="a")
+    target_state = np.asarray(root["data/state"][:], dtype=np.float32)
+    raw_state = np.concatenate(
+        [target_state, np.full((target_state.shape[0], 14), 1e6, dtype=np.float32)],
+        axis=1,
+    )
+    raw_hash = _sha256(raw_state)
+    root.attrs.update(
+        {
+            "source_state_schema": FLEXIV_RAW_FORCE_STATE_SCHEMA,
+            "source_state_dim": 48,
+            "source_state_names": list(FLEXIV_RAW_FORCE_STATE_NAMES),
+            "state_transform": FLEXIV_RAW_FORCE_TO_V2_TRANSFORM,
+            "dropped_state_names": list(FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES),
+            "raw_source_state_sha256": raw_hash,
+            "integrity": {
+                **root.attrs["integrity"],
+                "raw_source_state": raw_hash,
+            },
+        }
+    )
+    dataset = FlexivDualArmDataset(
+        zarr_path=str(zarr_path),
+        horizon=1,
+        expected_num_points=8,
+        expected_pointcloud_dim=3,
+    )
+    normalizer = dataset.get_normalizer()
+    assert tuple(normalizer["agent_pos"].params_dict["scale"].shape) == (34,)
 
 
 def test_flexiv_dataset_rejects_wrong_state_dim(tmp_path: Path) -> None:

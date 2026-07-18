@@ -10,7 +10,14 @@ import zarr
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.flexiv_state_contract import (
     FLEXIV_ACTION_DIM,
+    FLEXIV_LEGACY_STATE_DIM,
     FLEXIV_LEGACY_STATE_SCHEMA,
+    FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES,
+    FLEXIV_RAW_FORCE_STATE_DIM,
+    FLEXIV_RAW_FORCE_STATE_NAMES,
+    FLEXIV_RAW_FORCE_STATE_SCHEMA,
+    FLEXIV_RAW_FORCE_TO_V2_TRANSFORM,
+    FLEXIV_LEGACY_TO_V2_TRANSFORM,
     FLEXIV_STATE_DIM,
     FLEXIV_STATE_ROTATION_REFERENCE,
     FLEXIV_STATE_ROTATION_REPRESENTATION,
@@ -493,12 +500,18 @@ def _validate_zarr_schema(
             )
     source_schema = root.attrs.get("source_state_schema")
     source_transform = root.attrs.get("state_transform")
-    if source_schema not in {FLEXIV_STATE_SCHEMA, FLEXIV_LEGACY_STATE_SCHEMA}:
+    if source_schema not in {
+        FLEXIV_STATE_SCHEMA,
+        FLEXIV_LEGACY_STATE_SCHEMA,
+        FLEXIV_RAW_FORCE_STATE_SCHEMA,
+    }:
         raise ValueError(f"Unknown Zarr source_state_schema: {source_schema!r}")
     expected_transform = (
         "passthrough_v2"
         if source_schema == FLEXIV_STATE_SCHEMA
-        else "legacy_abs_rotvec_to_abs_rot6d"
+        else FLEXIV_LEGACY_TO_V2_TRANSFORM
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else FLEXIV_RAW_FORCE_TO_V2_TRANSFORM
     )
     if source_transform != expected_transform:
         raise ValueError(
@@ -510,11 +523,33 @@ def _validate_zarr_schema(
         FLEXIV_STATE_FIELD_NAMES
         if source_schema == FLEXIV_STATE_SCHEMA
         else tuple(flexiv_legacy_state_names())
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else tuple(FLEXIV_RAW_FORCE_STATE_NAMES)
     )
     if tuple(root.attrs.get("source_state_names") or ()) != expected_source_names:
         raise ValueError(
             "Zarr source_state_names/order does not match source_state_schema"
         )
+    expected_source_dim = (
+        FLEXIV_STATE_DIM
+        if source_schema == FLEXIV_STATE_SCHEMA
+        else FLEXIV_RAW_FORCE_STATE_DIM
+        if source_schema == FLEXIV_RAW_FORCE_STATE_SCHEMA
+        else FLEXIV_LEGACY_STATE_DIM
+    )
+    source_state_dim = root.attrs.get("source_state_dim")
+    if source_state_dim is not None and source_state_dim != expected_source_dim:
+        raise ValueError(
+            "Zarr source_state_dim does not match source_state_schema: "
+            f"expected={expected_source_dim}, got={source_state_dim!r}"
+        )
+    if source_schema == FLEXIV_RAW_FORCE_STATE_SCHEMA and source_state_dim != expected_source_dim:
+        raise ValueError("Zarr v3 source_state_dim metadata is required and must be 48")
+    if source_schema == FLEXIV_RAW_FORCE_STATE_SCHEMA:
+        if tuple(root.attrs.get("dropped_state_names") or ()) != FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES:
+            raise ValueError("Zarr v3 dropped_state_names/order does not match the source contract")
+    elif root.attrs.get("dropped_state_names") not in (None, [], ()):
+        raise ValueError("Only a v3 raw-force source may declare dropped_state_names")
     if "source_fps" not in root.attrs:
         raise ValueError("Zarr export is missing source_fps metadata")
     for key in (

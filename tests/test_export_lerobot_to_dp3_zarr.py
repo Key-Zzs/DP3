@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 from scipy.spatial.transform import Rotation
 
 
@@ -168,6 +171,12 @@ def _schema_info(state_names: list[str], state_dim: int) -> dict:
     }
 
 
+def _v3_schema_info() -> dict:
+    info = _schema_info(list(exporter.RAW_FORCE_STATE_FIELD_NAMES), exporter.FLEXIV_RAW_FORCE_STATE_DIM)
+    info["robot_state_schema"] = exporter.build_flexiv_raw_force_state_schema()
+    return info
+
+
 def test_legacy_abs_rotvec_to_v2_conversion_is_explicit_and_exact() -> None:
     legacy = np.zeros(exporter.FLEXIV_LEGACY_STATE_DIM, dtype=np.float32)
     legacy[:7] = np.arange(7, dtype=np.float32)
@@ -198,7 +207,7 @@ def test_legacy_abs_rotvec_to_v2_conversion_is_explicit_and_exact() -> None:
 
 def test_source_schema_detection_rejects_unknown_28d_and_requires_legacy_flag() -> None:
     unknown = _schema_info([f"unknown_{i}" for i in range(28)], 28)
-    with pytest.raises(ValueError, match="Unknown Flexiv state schema"):
+    with pytest.raises(ValueError, match="duplicate|Unknown Flexiv state schema"):
         exporter.detect_source_state_contract(unknown)
 
     legacy = _schema_info(list(exporter.LEGACY_STATE_FIELD_NAMES), 28)
@@ -219,6 +228,132 @@ def test_source_schema_detection_accepts_exact_v2_names() -> None:
     assert detected.transform == "passthrough_v2"
     source = _v2_state(1)[0]
     np.testing.assert_array_equal(exporter.convert_source_state(source, detected), source)
+
+
+def test_v3_source_projection_is_exactly_name_indexed_and_drops_only_force_fields() -> None:
+    info = _v3_schema_info()
+    detected = exporter.detect_source_state_contract(info)
+    assert detected.schema == exporter.FLEXIV_RAW_FORCE_STATE_SCHEMA
+    assert detected.state_dim == exporter.FLEXIV_RAW_FORCE_STATE_DIM
+    assert detected.transform == exporter.RAW_FORCE_CONVERTER_NAME
+    assert detected.dropped_state_names == exporter.FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES
+
+    source = np.arange(exporter.FLEXIV_RAW_FORCE_STATE_DIM, dtype=np.float32)
+    source[10:16] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    source[27:33] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    projected = exporter.convert_source_state(source, detected)
+    expected = source[np.asarray(detected.target_projection_indices, dtype=np.int64)]
+    np.testing.assert_array_equal(projected, expected)
+    np.testing.assert_array_equal(
+        projected,
+        np.asarray([source[detected.state_names.index(name)] for name in exporter.STATE_FIELD_NAMES]),
+    )
+
+
+def test_v3_force_values_do_not_change_projected_dp3_state() -> None:
+    detected = exporter.detect_source_state_contract(_v3_schema_info())
+    source = np.arange(exporter.FLEXIV_RAW_FORCE_STATE_DIM, dtype=np.float32)
+    source[10:16] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    source[27:33] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    baseline = exporter.convert_source_state(source, detected)
+    source_changed = source.copy()
+    source_indices = {name: index for index, name in enumerate(detected.state_names)}
+    source_changed[
+        np.asarray(
+            [source_indices[name] for name in detected.dropped_state_names],
+            dtype=np.int64,
+        )
+    ] = np.asarray(
+        [1e30, -1e30, 7.5, -8.5, 1e-30, -1e-30, 123456.0, -654321.0, 0.0, 1.0, -2.0, 3.0, -4.0, 5.0],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(exporter.convert_source_state(source_changed, detected), baseline)
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda names: names.__setitem__(35, names[34]),
+        lambda names: names.__setitem__(34, "unknown_force_field"),
+        lambda names: names.__setitem__(34, names[35]),
+    ],
+)
+def test_v3_source_names_must_be_complete_unique_and_exactly_ordered(mutator) -> None:
+    names = list(exporter.RAW_FORCE_STATE_FIELD_NAMES)
+    mutator(names)
+    info = _schema_info(names, exporter.FLEXIV_RAW_FORCE_STATE_DIM)
+    info["robot_state_schema"] = exporter.build_flexiv_raw_force_state_schema()
+    with pytest.raises(ValueError, match="duplicate|Unknown Flexiv state schema"):
+        exporter.detect_source_state_contract(info)
+
+
+@pytest.mark.parametrize(
+    ("names", "state_dim"),
+    [
+        (list(exporter.RAW_FORCE_STATE_FIELD_NAMES[:-1]), exporter.FLEXIV_RAW_FORCE_STATE_DIM - 1),
+        (
+            [*exporter.RAW_FORCE_STATE_FIELD_NAMES, "unknown_extra_force_field"],
+            exporter.FLEXIV_RAW_FORCE_STATE_DIM + 1,
+        ),
+    ],
+)
+def test_v3_missing_or_extra_unknown_field_fails_fast(names, state_dim) -> None:
+    info = _schema_info(names, state_dim)
+    info["robot_state_schema"] = exporter.build_flexiv_raw_force_state_schema()
+    with pytest.raises(ValueError, match="Unknown Flexiv state schema"):
+        exporter.detect_source_state_contract(info)
+
+
+def test_v3_source_metadata_mismatch_fails_before_rows_are_read() -> None:
+    info = _v3_schema_info()
+    info["robot_state_schema"]["state_dim"] = 34
+    with pytest.raises(ValueError, match="metadata state_dim"):
+        exporter.detect_source_state_contract(info)
+
+    info = _v3_schema_info()
+    info["features"][exporter.STATE_COLUMN]["shape"] = [34]
+    with pytest.raises(ValueError, match="metadata shape"):
+        exporter.detect_source_state_contract(info)
+
+
+def test_unknown_source_schema_is_rejected_before_parquet_rows_are_read(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "unknown_source"
+    (root / "meta").mkdir(parents=True)
+    info = _schema_info([f"unknown_{index}" for index in range(48)], 48)
+    info["robot_state_schema"] = {"state_schema": "unknown_48d_schema", "state_dim": 48}
+    (root / "meta/info.json").write_text(json.dumps(info), encoding="utf-8")
+    builder_config = tmp_path / "builder.yaml"
+    builder_config.write_text(
+        yaml.safe_dump(
+            {
+                "camera": {"name": "head"},
+                "pointcloud": {"output_format": "xyz", "use_rgb": False},
+                "sampling": {"num_points": 8},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        exporter,
+        "_data_parquet_paths",
+        lambda _root: pytest.fail("unknown source schema reached parquet row discovery"),
+    )
+    args = argparse.Namespace(
+        lerobot_path=str(root.resolve()),
+        output_zarr=str(tmp_path / "never_created.zarr"),
+        builder_config=str(builder_config),
+        target_state_schema=exporter.TARGET_STATE_SCHEMA,
+        allow_legacy_state_conversion=False,
+        camera="head",
+        pointcloud_mode="xyz",
+        num_points=8,
+        overwrite=False,
+        max_frames=None,
+        save_img=False,
+        verbose=False,
+    )
+    with pytest.raises(ValueError, match="Unknown Flexiv state schema"):
+        exporter.export_lerobot_to_dp3_zarr(args)
 
 
 def test_compute_episode_ends_from_episode_rows_and_max_frames() -> None:
@@ -342,6 +477,47 @@ def test_write_dp3_zarr_xyzrgb(tmp_path) -> None:
     assert root["data"]["point_cloud"].shape == (3, 4, 6)
     assert root["meta"]["episode_ends"][:].tolist() == [1, 3]
     assert exporter.verify_dp3_zarr(output) == root.attrs["integrity"]
+
+
+def test_write_dp3_zarr_v3_provenance_keeps_raw_and_derived_hashes_distinct(tmp_path) -> None:
+    zarr = pytest.importorskip("zarr")
+    output = tmp_path / "v3_output.zarr"
+    target_state = _v2_state(2)
+    raw_state = np.concatenate(
+        [target_state, np.asarray([[1.0] * 14, [-2.0] * 14], dtype=np.float32)],
+        axis=1,
+    )
+    raw_hash = exporter._numpy_sha256(raw_state, dtype=np.float32)
+    derived_hash = exporter._numpy_sha256(target_state, dtype=np.float32)
+    exporter.write_dp3_zarr(
+        output,
+        state=target_state,
+        action=np.zeros((2, 14), dtype=np.float32),
+        point_cloud=np.zeros((2, 8, 3), dtype=np.float32),
+        episode_ends=np.asarray([2], dtype=np.int64),
+        attrs={
+            "source_state_schema": exporter.FLEXIV_RAW_FORCE_STATE_SCHEMA,
+            "source_state_dim": exporter.FLEXIV_RAW_FORCE_STATE_DIM,
+            "source_state_names": list(exporter.RAW_FORCE_STATE_FIELD_NAMES),
+            "state_transform": exporter.RAW_FORCE_CONVERTER_NAME,
+            "dropped_state_names": list(exporter.FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES),
+            "raw_source_state_sha256": raw_hash,
+        },
+    )
+    root = zarr.open(str(output), mode="r")
+    assert root.attrs["state_schema"] == exporter.TARGET_STATE_SCHEMA
+    assert root.attrs["state_dim"] == 34
+    assert root.attrs["source_state_schema"] == exporter.FLEXIV_RAW_FORCE_STATE_SCHEMA
+    assert root.attrs["source_state_dim"] == 48
+    assert root.attrs["source_state_names"] == list(exporter.RAW_FORCE_STATE_FIELD_NAMES)
+    assert root.attrs["state_transform"] == exporter.RAW_FORCE_CONVERTER_NAME
+    assert root.attrs["dropped_state_names"] == list(exporter.FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES)
+    assert root.attrs["raw_source_state_sha256"] == raw_hash
+    assert root.attrs["derived_state_sha256"] == derived_hash
+    assert raw_hash != derived_hash
+    assert root["data/state"].shape == (2, 34)
+    assert root["data/action"].shape == (2, 14)
+    exporter.verify_dp3_zarr(output)
 
 
 def test_write_dp3_zarr_rejects_conflicting_source_metadata(tmp_path) -> None:

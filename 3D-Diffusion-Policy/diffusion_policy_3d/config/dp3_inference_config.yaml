@@ -159,7 +159,7 @@ inference:
 # background thread; control producers never block on a full queue. Actual TCP
 # feedback is sampled independently at 50 Hz to limit RDK lock contention.
 control_debug:
-  enabled: true
+  enabled: false
   feedback_hz: 50
   queue_size: 8192
   flush_interval_sec: 1.0

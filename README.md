@@ -393,6 +393,29 @@ data is rejected, and the output name includes `state_abs_rot6d_v2` so it
 cannot be confused with the old Zarr. Existing v1 checkpoints are incompatible
 with this runtime and require retraining.
 
+The acquisition-side LeRobot source may also use
+`flexiv_abs_rot6d_raw_force_v3` with `observation.state` shape `(48,)`. DP3
+still consumes only the target `flexiv_abs_rot6d_v2` `(34,)` state and the
+unchanged `(14,)` action. The shared source contract validates the exact schema,
+shape, dtype, finite values, and complete ordered names before rows are read;
+it builds the v3-to-v2 projection by matching each target name, never by
+assuming the first 34 positions. The following 14 source fields are dropped:
+
+```text
+left_ee_ext_wrench_in_tcp_raw.fx/fy/fz/mx/my/mz
+left_gripper_force
+right_ee_ext_wrench_in_tcp_raw.fx/fy/fz/mx/my/mz
+right_gripper_force
+```
+
+The derived Zarr records `source_state_schema`, `source_state_dim`, the full
+`source_state_names`, `state_transform=drop_raw_force_fields_v3_to_v2_by_name`,
+and `dropped_state_names`. `raw_source_state_sha256` covers all 48 source
+values, while `derived_state_sha256` covers the projected 34 values; different
+hashes are expected for v3. Force/wrench values never enter DP3 Zarr
+`data/state`, normalizer statistics, model inputs, checkpoints, training, or
+online inference.
+
 The repository already provides real-task YAMLs for XYZ and XYZRGB. The unified
 training config derives point-cloud color usage and encoder input channels from
 the selected task's `expected_pointcloud_dim`.

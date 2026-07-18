@@ -73,6 +73,24 @@ The converter requires exact legacy Flexiv names/order; unknown 28D data is
 rejected. It never overwrites a v1 Zarr. Existing v1 checkpoints are not
 compatible with the v2 runtime and must be retrained.
 
+The exporter also accepts the acquisition-side
+`flexiv_abs_rot6d_raw_force_v3` LeRobot source (`observation.state` shape
+`(48,)`). It validates the source schema metadata and projects to the unchanged
+DP3 target `flexiv_abs_rot6d_v2` `(34,)` state by exact field-name indices. It
+drops only these 14 source fields:
+
+```text
+left_ee_ext_wrench_in_tcp_raw.fx/fy/fz/mx/my/mz, left_gripper_force
+right_ee_ext_wrench_in_tcp_raw.fx/fy/fz/mx/my/mz, right_gripper_force
+```
+
+The output remains `data/state=(T,34)` and `data/action=(T,14)`. Its provenance
+contains the full 48-name source contract, `source_state_dim=48`,
+`state_transform=drop_raw_force_fields_v3_to_v2_by_name`, and
+`dropped_state_names`. The raw hash covers all 48 source values and the derived
+hash covers the 34D projection; raw force/wrench values are excluded from the
+DP3 normalizer, model, checkpoint, training samples, and online agent state.
+
 ## Configure Training
 
 All launcher and training parameters are configured in

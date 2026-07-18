@@ -359,6 +359,27 @@ Exporter 会严格验证 LeRobot 的 state/action names/order 和 schema metadat
 不会传播。未知 28D 数据会直接拒绝，输出名称包含 `state_abs_rot6d_v2`，不会和旧
 Zarr 混淆。旧 v1 checkpoint 与新 runtime 不兼容，必须重新训练。
 
+采集侧 LeRobot source 也可以使用 `flexiv_abs_rot6d_raw_force_v3`，其
+`observation.state` shape 为 `(48,)`。DP3 target 仍严格是
+`flexiv_abs_rot6d_v2` 的 `(34,)` state，action 仍为 `(14,)`。共享 source
+contract 会在读取数据行之前严格验证 schema、shape、dtype、有限值以及完整且有序
+的字段名；v3 到 v2 的 projection 按每个 target 字段名建立索引，绝不假设前 34
+个位置就是 target。以下 14 个 source 字段会被删除：
+
+```text
+left_ee_ext_wrench_in_tcp_raw.fx/fy/fz/mx/my/mz
+left_gripper_force
+right_ee_ext_wrench_in_tcp_raw.fx/fy/fz/mx/my/mz
+right_gripper_force
+```
+
+派生 Zarr 会记录 `source_state_schema`、`source_state_dim`、完整的
+`source_state_names`、`state_transform=drop_raw_force_fields_v3_to_v2_by_name`
+和 `dropped_state_names`。`raw_source_state_sha256` 覆盖完整 48D source，
+`derived_state_sha256` 覆盖投影后的 34D；v3 时两者不同是预期行为。力/力矩字段
+不会进入 DP3 Zarr 的 `data/state`、normalizer statistics、模型输入、checkpoint、
+训练或在线推理。
+
 仓库已经提供 XYZ 和 XYZRGB 两个真实任务 YAML。统一训练配置会根据所选任务的
 `expected_pointcloud_dim` 自动决定是否使用颜色，并自动设置点云 encoder 输入通道数。
 

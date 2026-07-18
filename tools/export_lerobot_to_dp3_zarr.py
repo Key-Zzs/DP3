@@ -32,17 +32,27 @@ from diffusion_policy_3d.common.flexiv_state_contract import (
     FLEXIV_ACTION_DIM,
     FLEXIV_LEGACY_STATE_SCHEMA,
     FLEXIV_LEGACY_STATE_DIM,
+    FLEXIV_LEGACY_TO_V2_TRANSFORM,
+    FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES,
+    FLEXIV_RAW_FORCE_STATE_DIM,
+    FLEXIV_RAW_FORCE_STATE_NAMES,
+    FLEXIV_RAW_FORCE_STATE_SCHEMA,
+    FLEXIV_RAW_FORCE_TO_V2_TRANSFORM,
     FLEXIV_STATE_DIM,
     FLEXIV_STATE_ROTATION_REFERENCE,
     FLEXIV_STATE_ROTATION_REPRESENTATION,
     FLEXIV_STATE_SCHEMA,
     FLEXIV_ROTATION6D_CONVENTION,
     FLEXIV_ROTATION6D_ORDER,
+    FlexivSourceStateContract,
+    build_flexiv_raw_force_state_schema,
     build_flexiv_state_schema,
     convert_legacy_abs_rotvec_state,
+    detect_flexiv_source_state_contract,
     flexiv_action_names,
     flexiv_legacy_state_names,
     flexiv_state_names,
+    project_flexiv_source_state_to_v2,
     rotation_matrix_to_rot6d,
     validate_flexiv_state_rotation6d,
 )
@@ -56,9 +66,11 @@ STATE_DIM = FLEXIV_STATE_DIM
 ACTION_DIM = FLEXIV_ACTION_DIM
 STATE_FIELD_NAMES = tuple(flexiv_state_names())
 LEGACY_STATE_FIELD_NAMES = tuple(flexiv_legacy_state_names())
+RAW_FORCE_STATE_FIELD_NAMES = tuple(FLEXIV_RAW_FORCE_STATE_NAMES)
 ACTION_FIELD_NAMES = tuple(flexiv_action_names())
 TARGET_STATE_SCHEMA = FLEXIV_STATE_SCHEMA
-LEGACY_CONVERTER_NAME = "legacy_abs_rotvec_to_abs_rot6d"
+LEGACY_CONVERTER_NAME = FLEXIV_LEGACY_TO_V2_TRANSFORM
+RAW_FORCE_CONVERTER_NAME = FLEXIV_RAW_FORCE_TO_V2_TRANSFORM
 DEFAULT_OUTPUT_ROOT = Path.home() / ".cache" / "dp3_zarr"
 LEROBOT_CACHE_ROOT = Path.home() / ".cache" / "huggingface" / "lerobot"
 EXPORT_STATUS_ATTR = "export_status"
@@ -114,12 +126,7 @@ class BuilderConfigContract:
     depth_source: str
 
 
-@dataclass(frozen=True)
-class SourceStateContract:
-    schema: str
-    transform: str
-    state_dim: int
-    state_names: tuple[str, ...]
+SourceStateContract = FlexivSourceStateContract
 
 
 def convert_legacy_abs_rotvec_to_v2(state: Any) -> np.ndarray:
@@ -128,200 +135,24 @@ def convert_legacy_abs_rotvec_to_v2(state: Any) -> np.ndarray:
     return convert_legacy_abs_rotvec_state(state)
 
 
-def _feature_shape(feature: Any, *, label: str) -> tuple[int, ...]:
-    if not isinstance(feature, dict) or "shape" not in feature:
-        raise ValueError(f"LeRobot metadata is missing {label} feature shape")
-    try:
-        return tuple(int(value) for value in feature["shape"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"LeRobot metadata has invalid {label} feature shape") from exc
-
-
-def _feature_names(feature: Any, *, label: str) -> tuple[str, ...]:
-    if not isinstance(feature, dict) or not isinstance(feature.get("names"), (list, tuple)):
-        raise ValueError(
-            f"LeRobot metadata is missing exact {label} names/order; "
-            "dimension-only schema detection is forbidden"
-        )
-    names = tuple(str(name) for name in feature["names"])
-    if any(not name for name in names):
-        raise ValueError(f"LeRobot metadata contains an empty {label} field name")
-    return names
-
-
-def _state_schema_metadata(info: dict[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for key in ("robot_state_schema", "state_schema_metadata"):
-        value = info.get(key)
-        if value is not None:
-            if isinstance(value, dict):
-                candidates.append(value)
-            elif isinstance(value, str) and value.strip():
-                candidates.append({"state_schema": value.strip()})
-            else:
-                raise ValueError(
-                    f"LeRobot metadata {key!r} must be a mapping or schema string"
-                )
-    value = info.get("state_schema")
-    if isinstance(value, dict):
-        candidates.append(value)
-    elif isinstance(value, str) and value.strip():
-        candidates.append({"state_schema": value.strip()})
-    elif value is not None:
-        raise ValueError(
-            "LeRobot metadata 'state_schema' must be a mapping or schema string"
-        )
-    top_level_contract = {
-        key: info[key]
-        for key in (
-            "state_dim",
-            "action_dim",
-            "state_names",
-            "action_names",
-            "state_rotation_representation",
-            "state_rotation_reference",
-            "rotation6d_convention",
-            "rotation6d_order",
-            "action_rotation_representation",
-        )
-        if key in info
-    }
-    if top_level_contract:
-        candidates.append(top_level_contract)
-    return candidates
-
-
-def _validate_state_schema_metadata(
-    metadata: dict[str, Any],
-    *,
-    source_schema: str,
-    state_names: tuple[str, ...],
-    action_names: tuple[str, ...],
-) -> None:
-    declared_schema = metadata.get("state_schema")
-    legacy_aliases = {
-        FLEXIV_LEGACY_STATE_SCHEMA,
-        "flexiv_abs_rotvec",
-        "flexiv_physical_v1",
-    }
-    allowed_schemas = (
-        {TARGET_STATE_SCHEMA}
-        if source_schema == TARGET_STATE_SCHEMA
-        else legacy_aliases
-    )
-    if declared_schema is not None and declared_schema not in allowed_schemas:
-        raise ValueError(
-            "LeRobot state schema metadata conflicts with feature names: "
-            f"declared={declared_schema!r}, detected={source_schema!r}"
-        )
-    expected_names = STATE_FIELD_NAMES if source_schema == TARGET_STATE_SCHEMA else LEGACY_STATE_FIELD_NAMES
-    if "state_names" in metadata and tuple(metadata["state_names"]) != expected_names:
-        raise ValueError("LeRobot state schema metadata state_names/order is not exact")
-    if "action_names" in metadata and tuple(metadata["action_names"]) != ACTION_FIELD_NAMES:
-        raise ValueError("LeRobot state schema metadata action_names/order is not exact")
-    if source_schema == TARGET_STATE_SCHEMA:
-        for key, expected in (
-            ("state_dim", STATE_DIM),
-            ("action_dim", ACTION_DIM),
-            ("state_rotation_representation", FLEXIV_STATE_ROTATION_REPRESENTATION),
-            ("state_rotation_reference", FLEXIV_STATE_ROTATION_REFERENCE),
-            ("rotation6d_convention", FLEXIV_ROTATION6D_CONVENTION),
-            ("rotation6d_order", list(FLEXIV_ROTATION6D_ORDER)),
-            ("action_rotation_representation", "rotvec"),
-        ):
-            if key in metadata and metadata[key] != expected:
-                raise ValueError(
-                    f"LeRobot state schema metadata {key}={metadata[key]!r} "
-                    f"does not match {expected!r}"
-                )
-    else:
-        for key, expected in (
-            ("state_dim", FLEXIV_LEGACY_STATE_DIM),
-            ("action_dim", ACTION_DIM),
-            ("state_rotation_representation", "absolute_rotvec"),
-            ("state_rotation_reference", FLEXIV_STATE_ROTATION_REFERENCE),
-            ("action_rotation_representation", "rotvec"),
-        ):
-            if key in metadata and metadata[key] != expected:
-                raise ValueError(
-                    f"Legacy Flexiv metadata {key}={metadata[key]!r} "
-                    f"does not match {expected!r}"
-                )
-        if "rotation6d_convention" in metadata:
-            raise ValueError(
-                "Legacy Flexiv metadata must not declare a rotation-6D convention"
-            )
-        if "rotation6d_order" in metadata:
-            raise ValueError(
-                "Legacy Flexiv metadata must not declare a rotation-6D order"
-            )
-
-
 def detect_source_state_contract(
     info: dict[str, Any],
     *,
     target_state_schema: str = TARGET_STATE_SCHEMA,
     allow_legacy_conversion: bool = False,
 ) -> SourceStateContract:
-    """Detect v2 or explicitly identifiable v1 metadata before reading rows."""
+    """Compatibility wrapper for the shared source-state detector."""
 
     if target_state_schema != TARGET_STATE_SCHEMA:
         raise ValueError(
             f"Only target state schema {TARGET_STATE_SCHEMA!r} is supported, "
             f"got {target_state_schema!r}"
         )
-    features = info.get("features")
-    if not isinstance(features, dict):
-        raise ValueError("LeRobot meta/info.json is missing the features mapping")
-    state_feature = features.get(STATE_COLUMN)
-    action_feature = features.get(ACTION_COLUMN)
-    state_shape = _feature_shape(state_feature, label=STATE_COLUMN)
-    action_shape = _feature_shape(action_feature, label=ACTION_COLUMN)
-    state_names = _feature_names(state_feature, label=STATE_COLUMN)
-    action_names = _feature_names(action_feature, label=ACTION_COLUMN)
-    if action_shape != (ACTION_DIM,) or action_names != ACTION_FIELD_NAMES:
-        raise ValueError(
-            "LeRobot action schema mismatch: expected exact 14D Flexiv delta-rotvec "
-            f"names/order, got shape={action_shape}, names={action_names!r}"
-        )
-
-    if state_names == STATE_FIELD_NAMES:
-        detected_schema = TARGET_STATE_SCHEMA
-        expected_dim = STATE_DIM
-        transform = "passthrough_v2"
-    elif state_names == LEGACY_STATE_FIELD_NAMES:
-        detected_schema = FLEXIV_LEGACY_STATE_SCHEMA
-        expected_dim = FLEXIV_LEGACY_STATE_DIM
-        transform = LEGACY_CONVERTER_NAME
-    else:
-        raise ValueError(
-            "Unknown Flexiv state schema: exact state names/order do not match either "
-            f"v2 ({STATE_DIM}D) or the supported legacy v1 ({FLEXIV_LEGACY_STATE_DIM}D). "
-            "The exporter will not infer semantics from array dimensions."
-        )
-    if state_shape != (expected_dim,):
-        raise ValueError(
-            f"Detected {detected_schema!r} by names but metadata shape is {state_shape}; "
-            f"expected ({expected_dim},)"
-        )
-    for metadata in _state_schema_metadata(info):
-        _validate_state_schema_metadata(
-            metadata,
-            source_schema=detected_schema,
-            state_names=state_names,
-            action_names=action_names,
-        )
-    if detected_schema == FLEXIV_LEGACY_STATE_SCHEMA and not allow_legacy_conversion:
-        raise ValueError(
-            "Detected the supported legacy Flexiv 28D absolute-rotvec schema, but legacy "
-            "conversion was not explicitly enabled. Re-run with "
-            "--allow-legacy-state-conversion; unknown 28D data is never guessed."
-        )
-    return SourceStateContract(
-        schema=detected_schema,
-        transform=transform,
-        state_dim=expected_dim,
-        state_names=state_names,
+    return detect_flexiv_source_state_contract(
+        info,
+        state_column=STATE_COLUMN,
+        action_column=ACTION_COLUMN,
+        allow_legacy_conversion=allow_legacy_conversion,
     )
 
 
@@ -329,22 +160,9 @@ def convert_source_state(
     state: Any,
     source_contract: SourceStateContract,
 ) -> np.ndarray:
-    """Apply only the conversion selected by ``detect_source_state_contract``."""
+    """Compatibility wrapper for the shared source-state projection helper."""
 
-    values = np.asarray(state, dtype=np.float32)
-    if values.shape != (source_contract.state_dim,):
-        raise ValueError(
-            f"source state shape {values.shape} != ({source_contract.state_dim},) "
-            f"for {source_contract.schema}"
-        )
-    if source_contract.schema == TARGET_STATE_SCHEMA:
-        validate_flexiv_state_rotation6d(values, context="source v2 state")
-        return values.copy()
-    if source_contract.schema == FLEXIV_LEGACY_STATE_SCHEMA:
-        if source_contract.transform != LEGACY_CONVERTER_NAME:
-            raise ValueError(f"Unsupported legacy state transform {source_contract.transform!r}")
-        return convert_legacy_abs_rotvec_to_v2(values)
-    raise ValueError(f"Unsupported source state schema {source_contract.schema!r}")
+    return project_flexiv_source_state_to_v2(state, source_contract)
 
 
 def _with_v2_contract_attrs(attrs: dict[str, Any] | None) -> dict[str, Any]:
@@ -374,20 +192,36 @@ def _with_v2_contract_attrs(attrs: dict[str, Any] | None) -> dict[str, Any]:
         output.setdefault(key, expected)
 
     source_schema = output.setdefault("source_state_schema", TARGET_STATE_SCHEMA)
-    if source_schema not in {TARGET_STATE_SCHEMA, FLEXIV_LEGACY_STATE_SCHEMA}:
+    if source_schema not in {
+        TARGET_STATE_SCHEMA,
+        FLEXIV_LEGACY_STATE_SCHEMA,
+        FLEXIV_RAW_FORCE_STATE_SCHEMA,
+    }:
         raise ValueError(f"Unknown DP3 source_state_schema: {source_schema!r}")
     expected_transform = (
         "passthrough_v2"
         if source_schema == TARGET_STATE_SCHEMA
         else LEGACY_CONVERTER_NAME
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else RAW_FORCE_CONVERTER_NAME
     )
     expected_source_names = (
         STATE_FIELD_NAMES
         if source_schema == TARGET_STATE_SCHEMA
         else LEGACY_STATE_FIELD_NAMES
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else RAW_FORCE_STATE_FIELD_NAMES
+    )
+    expected_source_dim = (
+        STATE_DIM
+        if source_schema == TARGET_STATE_SCHEMA
+        else FLEXIV_LEGACY_STATE_DIM
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else FLEXIV_RAW_FORCE_STATE_DIM
     )
     for key, expected in (
         ("state_transform", expected_transform),
+        ("source_state_dim", expected_source_dim),
         ("source_state_names", list(expected_source_names)),
     ):
         if key in output and output[key] != expected:
@@ -395,6 +229,12 @@ def _with_v2_contract_attrs(attrs: dict[str, Any] | None) -> dict[str, Any]:
                 f"DP3 source metadata {key}={output[key]!r} conflicts with {expected!r}"
             )
         output.setdefault(key, expected)
+    if source_schema == FLEXIV_RAW_FORCE_STATE_SCHEMA:
+        if "dropped_state_names" in output and tuple(output["dropped_state_names"]) != FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES:
+            raise ValueError("DP3 v3 source metadata dropped_state_names/order is not exact")
+        output.setdefault("dropped_state_names", list(FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES))
+    elif output.get("dropped_state_names") not in (None, [], ()):
+        raise ValueError("Only the v3 raw-force source may declare dropped_state_names")
     output.setdefault("source_fps", None)
     output.setdefault("depth_source", "native_depth")
     output.setdefault("native_depth_used_for_builder", True)
@@ -580,10 +420,13 @@ def write_dp3_zarr(
         source_schema = export_attrs["source_state_schema"]
         raw_source_hash = export_attrs.get("raw_source_state_sha256")
         if raw_source_hash is None:
-            if source_schema == FLEXIV_LEGACY_STATE_SCHEMA:
+            if source_schema in {
+                FLEXIV_LEGACY_STATE_SCHEMA,
+                FLEXIV_RAW_FORCE_STATE_SCHEMA,
+            }:
                 raise ValueError(
                     "write_dp3_zarr requires raw_source_state_sha256 when source_state_schema "
-                    "is the legacy Flexiv schema"
+                    "is a converted Flexiv source schema"
                 )
             raw_source_hash = state_hash
         if not isinstance(raw_source_hash, str) or len(raw_source_hash) != 64:
@@ -1908,18 +1751,25 @@ def _validate_v2_zarr_metadata(attrs: Any) -> None:
     if attrs.get("state_transform") not in {
         "passthrough_v2",
         LEGACY_CONVERTER_NAME,
+        RAW_FORCE_CONVERTER_NAME,
     }:
         raise ValueError(
-            "Zarr state_transform must be passthrough_v2 or "
-            f"{LEGACY_CONVERTER_NAME}"
+            "Zarr state_transform must be passthrough_v2, "
+            f"{LEGACY_CONVERTER_NAME}, or {RAW_FORCE_CONVERTER_NAME}"
         )
     source_schema = attrs.get("source_state_schema")
-    if source_schema not in {TARGET_STATE_SCHEMA, FLEXIV_LEGACY_STATE_SCHEMA}:
+    if source_schema not in {
+        TARGET_STATE_SCHEMA,
+        FLEXIV_LEGACY_STATE_SCHEMA,
+        FLEXIV_RAW_FORCE_STATE_SCHEMA,
+    }:
         raise ValueError(f"Unknown Zarr source_state_schema: {source_schema!r}")
     expected_transform = (
         "passthrough_v2"
         if source_schema == TARGET_STATE_SCHEMA
         else LEGACY_CONVERTER_NAME
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else RAW_FORCE_CONVERTER_NAME
     )
     if attrs.get("state_transform") != expected_transform:
         raise ValueError(
@@ -1932,9 +1782,28 @@ def _validate_v2_zarr_metadata(attrs: Any) -> None:
         STATE_FIELD_NAMES
         if source_schema == TARGET_STATE_SCHEMA
         else LEGACY_STATE_FIELD_NAMES
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else RAW_FORCE_STATE_FIELD_NAMES
     )
     if tuple(source_names or ()) != expected_source_names:
         raise ValueError("Zarr source_state_names/order does not match source_state_schema")
+    expected_source_dim = (
+        STATE_DIM
+        if source_schema == TARGET_STATE_SCHEMA
+        else FLEXIV_LEGACY_STATE_DIM
+        if source_schema == FLEXIV_LEGACY_STATE_SCHEMA
+        else FLEXIV_RAW_FORCE_STATE_DIM
+    )
+    if attrs.get("source_state_dim") != expected_source_dim:
+        raise ValueError(
+            "Zarr source_state_dim does not match source_state_schema: "
+            f"expected={expected_source_dim}, got={attrs.get('source_state_dim')!r}"
+        )
+    if source_schema == FLEXIV_RAW_FORCE_STATE_SCHEMA:
+        if tuple(attrs.get("dropped_state_names") or ()) != FLEXIV_RAW_FORCE_DROPPED_STATE_NAMES:
+            raise ValueError("Zarr v3 dropped_state_names/order does not match the source contract")
+    elif attrs.get("dropped_state_names") not in (None, [], ()):
+        raise ValueError("Only a v3 raw-force source may declare dropped_state_names")
     if "source_fps" not in attrs:
         raise ValueError("Zarr is missing source_fps metadata")
     for key in ("raw_source_state_sha256", "derived_state_sha256", "exported_state_sha256"):
@@ -2040,11 +1909,14 @@ def _zarr_attrs(
         "rotation6d_order": list(FLEXIV_ROTATION6D_ORDER),
         "action_rotation_representation": "rotvec",
         "source_state_schema": source_contract.schema,
+        "source_state_dim": int(source_contract.state_dim),
         "source_state_names": list(source_contract.state_names),
         "state_transform": source_contract.transform,
         "source_fps": source_fps,
         "native_depth_used_for_builder": depth_source == "native_depth",
     }
+    if source_contract.dropped_state_names:
+        attrs["dropped_state_names"] = list(source_contract.dropped_state_names)
     attrs.update(sidecar_source.provenance)
     if ffs_provenance is not None:
         attrs.update(_flatten_ffs_provenance(ffs_provenance))
