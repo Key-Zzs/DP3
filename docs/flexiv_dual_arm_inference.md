@@ -116,7 +116,7 @@ The inference YAML owns:
 - action scaling, Cartesian/rotation limits, and runtime watchdogs;
 - PointCloudBuilder runtime YAML;
 - audit-log directory and stop file;
-- Open3D visualization settings.
+- process-isolated Rerun monitor settings.
 
 The checkpoint keeps its DDPM/epsilon training contract. The current deployment
 constructs a DDIM scheduler from that stored beta schedule and uses 10 inference
@@ -241,20 +241,132 @@ Repeated RGB-D frames, padded point clouds, non-finite values, stale actions,
 or watchdog violations stop the loop. These are runtime safety conditions, not
 a separate no-send deployment stage.
 
-## Open3D Monitor
+## Rerun Telemetry Monitor
 
-Visualization is enabled in the inference YAML by default. A separate process
-shows a 2x2 monitor containing:
+The live monitor is deliberately outside the control process:
 
-1. colorized depth;
-2. raw deprojected point cloud;
-3. cropped point cloud;
-4. the complete sampled policy input.
+```text
+DP3 inference/control
+        | non-blocking fixed-size writes
+        v
+multiprocessing.shared_memory latest-only rings (capacity 3)
+        v
+independent telemetry process
+        +--> local Viewer (spawn)
+        +--> manual or remote Viewer (connect_grpc)
+```
 
-PointCloudBuilder runs once in the control process. Raw and cropped clouds are
-decimated only for display. Capacity-one non-blocking queues keep the newest
-frame and discard stale visualization frames. The default display rate is 2 Hz,
-and closing the window does not stop robot inference.
+Core code is in `visualizer/visualizer/monitor/`:
+
+- `config.py` and `schema.py` validate the monitor YAML and fixed payload
+  contract;
+- `shared_ring.py` provides independent control, camera, sampled point-cloud,
+  and optional stage rings;
+- `client.py` is the producer-side frequency gate and best-effort publisher;
+- `process.py` owns the spawned telemetry child;
+- `rerun_sink.py` and `blueprint.py` are child-only Rerun code;
+- `benchmark.py` runs synthetic transport/resource measurements.
+
+The inference process does not import Rerun or call a Rerun logging API. RGB,
+depth, point clouds, state, actions, and policy horizons use fixed shared-memory
+arrays. A producer tries slot locks with `block=False`; if all slots are busy,
+the record is dropped immediately. The consumer copies only the newest committed
+slot into a private buffer, releases the lock, and then logs to Rerun. Stale
+frames are never replayed and there is no unbounded backlog.
+
+The checked-in configuration publishes control at `inference.rate_hz`, camera
+and sampled point clouds at 2 Hz, and raw/cropped stages at 1 Hz. Raw/cropped
+display is capped at 5,000 points per stage because it adds a low-frequency
+Builder/D2H and rendering cost. The Builder still runs exactly once per control
+cycle: normal cycles use `from_live_frame()`, while a due stage cycle uses the
+same-pass `from_live_frame_with_stages()` instead.
+
+The Viewer time panel defaults to the `log_time` timeline in `Following` state.
+`activate_blueprint_on_start: true` actively applies it for every recording, so
+an older paused cursor cannot remain before the first RGB-D sample.
+
+Rerun display rates are telemetry rates, not camera capture rates. The current
+profile deliberately uses `min_bulk_slack_ms: 0`: publication occurs only after
+action send, and measured normal monitor transport is below 0.4 ms p99. A
+positive slack threshold suppressed almost every bulk frame when the existing
+10 Hz PointCloudBuilder loop took about 126 ms. If another deployment has less
+watchdog margin, disable raw/cropped first or restore a positive threshold.
+
+Time-series units are grouped in the default Blueprint:
+
+- joints and action rotation vectors: radians;
+- TCP xyz and action delta xyz: metres;
+- state rotation-6D matrix-column components: unitless;
+- normalized gripper state/command: unitless `[0, 1]`;
+- timing: milliseconds;
+- telemetry health: counters or boolean status represented as `0/1`.
+
+Point-cloud xyz axes and decoded depth are metres. RGB values are `uint8`
+intensities. For raw/cropped diagnostics, keep their display limits small
+(the default is 5,000 points per stage), hide unused 3D/time-series views, and
+restart the Viewer after a heavy recording to release its retained history.
+
+Install the optional monitor dependencies in the active DP3 environment:
+
+```bash
+python -m pip install -e "visualizer[monitor]"
+```
+
+Start a local Viewer automatically from the telemetry child:
+
+```yaml
+monitor:
+  enabled: true
+  viewer:
+    mode: spawn
+    port: 9876
+    memory_limit: 2GB
+    detach_process: true
+    activate_blueprint_on_start: true
+```
+
+The detached Viewer remains open after inference stops. The next inference run
+reuses the existing listener on port 9876. Close the Viewer explicitly when its
+retained history is no longer needed.
+
+For a manually started local Viewer:
+
+```bash
+rerun --port 9876 --memory-limit 2GB
+```
+
+```yaml
+monitor:
+  viewer:
+    mode: connect
+    url: rerun+http://127.0.0.1:9876
+```
+
+The same `connect` mode supports a remote Viewer. On the Viewer host run
+`rerun --bind 0.0.0.0 --port 9876 --memory-limit 2GB`, and set
+`monitor.viewer.url` to `rerun+http://<viewer-ip>:9876` on the inference host.
+Use a trusted LAN/VPN or firewall rule for that port. Closing, disconnecting,
+or crashing the Viewer/telemetry child is fail-open and does not stop the
+inference loop. `monitor.enabled: false` is a true no-op: no shared memory,
+child process, or Rerun import is created.
+
+Set `activate_blueprint_on_start: false` to preserve a hand-tuned active layout;
+in that mode, select Following manually in the time panel.
+
+Run the synthetic benchmark without hardware:
+
+```bash
+python tools/benchmark_dp3_monitor.py
+```
+
+It writes `logs/monitor_benchmark/<timestamp>/config_resolved.yaml`,
+`system_info.json`, `samples.csv`, `resource_report.json`, and
+`resource_report.md`. The report separates baseline, shared-memory/null-sink,
+and local Viewer CPU/RSS, publish latency, cycle jitter, deadline misses,
+drops/overwrites, effective rates, consumer heartbeat/lag, and Viewer
+startup/shutdown. The tested optional dependency is `rerun-sdk==0.34.1` with
+`psutil==7.2.2`. Headless runs
+must be read as “headless viewer; not equivalent to visible native rendering”.
 
 ## Stop and Logs
 

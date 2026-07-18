@@ -41,9 +41,13 @@ if str(TOOLS_DIR) not in sys.path:
 import export_lerobot_to_dp3_zarr as exporter  # noqa: E402
 from pointcloud_builder import PointCloudBuilder  # noqa: E402
 from pointcloud_builder.config import load_config as load_pointcloud_config  # noqa: E402
-from tools.flexiv_dp3_live_viewer import (  # noqa: E402
-    LiveVisualizationPublisher,
-    ViewerConfig,
+VISUALIZER_ROOT = REPO_ROOT / "visualizer"
+if VISUALIZER_ROOT.exists():
+    sys.path.insert(0, str(VISUALIZER_ROOT))
+from visualizer.monitor import (  # noqa: E402
+    MonitorClient,
+    TelemetryShapes,
+    load_monitor_config,
 )
 
 LOGGER = logging.getLogger("flexiv_dp3_perception_only")
@@ -138,8 +142,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         camera.connect(warmup=False)
         _discard_warmup_frames(camera, runtime)
-        if viewer is not None:
-            viewer.start()
         with log_path.open("w", encoding="utf-8") as log_file:
             for index in range(runtime.frames):
                 capture_started = time.perf_counter()
@@ -169,12 +171,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if index < 5 or (index + 1) % runtime.print_every == 0:
                     _print_record(record)
                 if viewer is not None:
-                    viewer.maybe_publish(
-                        step_idx=index,
+                    viewer.publish_cycle(
+                        cycle_id=index,
+                        plan=viewer.plan_cycle(),
+                        rgb=frame.get("rgb"),
                         depth=frame["depth"],
                         stages=stages,
                         sampled_point_cloud=_to_numpy(sampled),
                         pointcloud_meta=meta,
+                        depth_scale=float(builder.camera.depth_scale),
+                        frame_index=int(_optional_int(frame.get("frame_index")) or -1),
                     )
     except KeyboardInterrupt:
         interrupted = True
@@ -214,7 +220,7 @@ def _load_runtime(args: argparse.Namespace) -> Runtime:
     robot_section = _mapping(config, "robot")
     inference_section = _mapping(config, "inference")
     pointcloud_section = _mapping(config, "pointcloud")
-    visualization_section = _mapping(config, "visualization", required=False)
+    monitor_config = load_monitor_config(config, inference_rate_hz=float(inference_section.get("rate_hz", 10.0)))
 
     robot_config_path = _resolve_path(robot_section["config"])
     robot_config = _load_yaml(robot_config_path)
@@ -252,12 +258,12 @@ def _load_runtime(args: argparse.Namespace) -> Runtime:
     visualize = (
         bool(args.visualize)
         if args.visualize is not None
-        else bool(visualization_section.get("enabled", True))
+        else bool(monitor_config.enabled)
     )
     viewer_rate_hz = (
         float(args.viewer_rate_hz)
         if args.viewer_rate_hz is not None
-        else float(visualization_section.get("rate_hz", 2.0))
+        else float(monitor_config.rates.sampled_pointcloud_hz)
     )
     pointcloud_config_path = (
         args.builder_config.expanduser().resolve()
@@ -285,11 +291,7 @@ def _load_runtime(args: argparse.Namespace) -> Runtime:
         log_dir=args.log_dir.expanduser().resolve(),
         visualize=visualize,
         viewer_rate_hz=viewer_rate_hz,
-        visualization_max_raw_points=int(visualization_section.get("max_raw_points", 30000)),
-        visualization_max_cropped_points=int(
-            visualization_section.get("max_cropped_points", 30000)
-        ),
-        visualization_point_size=float(visualization_section.get("point_size", 3.0)),
+        monitor_config=monitor_config,
         fail_on_quality=bool(args.fail_on_quality),
         gpu_id=int(inference_section.get("gpu_id", 0)),
     )
@@ -392,25 +394,43 @@ def _validate_camera_builder_contract(runtime: Runtime, builder: PointCloudBuild
         )
 
 
-def _make_viewer(runtime: Runtime, builder: PointCloudBuilder) -> LiveVisualizationPublisher | None:
+def _make_viewer(runtime: Runtime, builder: PointCloudBuilder) -> MonitorClient | None:
     if not runtime.visualize:
         return None
-    intrinsics = builder.camera.active_intrinsics
-    return LiveVisualizationPublisher(
-        rate_hz=runtime.viewer_rate_hz,
-        max_raw_points=runtime.visualization_max_raw_points,
-        max_cropped_points=runtime.visualization_max_cropped_points,
-        viewer_config=ViewerConfig(
-            title="DP3 Perception Only | No Robot Connection",
-            camera_width=int(builder.camera.width),
-            camera_height=int(builder.camera.height),
-            camera_fx=float(intrinsics.fx),
-            camera_fy=float(intrinsics.fy),
-            camera_cx=float(intrinsics.cx),
-            camera_cy=float(intrinsics.cy),
-            depth_scale=float(builder.camera.depth_scale),
-            point_size=runtime.visualization_point_size,
+    from dataclasses import replace
+
+    config = replace(
+        runtime.monitor_config,
+        enabled=True,
+        rates=replace(
+            runtime.monitor_config.rates,
+            camera_hz=runtime.viewer_rate_hz,
+            sampled_pointcloud_hz=runtime.viewer_rate_hz,
+            stage_pointcloud_hz=runtime.viewer_rate_hz,
         ),
+        payloads=replace(
+            runtime.monitor_config.payloads,
+            raw_pointcloud=True,
+            cropped_pointcloud=True,
+        ),
+    )
+    point_dim = 6 if str(builder.config.pointcloud.output_format) == "xyzrgb" else 3
+    shapes = TelemetryShapes(
+        camera_height=int(builder.camera.height),
+        camera_width=int(builder.camera.width),
+        point_count=int(builder.config.sampling.num_points),
+        point_dim=point_dim,
+        state_dim=1,
+        action_dim=1,
+        policy_horizon=1,
+        depth_dtype=str(runtime.monitor_config.depth_dtype),
+        max_raw_points=int(config.display.max_raw_points),
+        max_cropped_points=int(config.display.max_cropped_points),
+    )
+    return MonitorClient.create(
+        config,
+        shapes,
+        static_metadata={"state_field_names": [], "action_field_names": []},
     )
 
 

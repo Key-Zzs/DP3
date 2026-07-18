@@ -6,7 +6,7 @@
 # - relative FFS artifact paths are relative to this file.
 #
 # The active deployment contract in this checkout is ffs_stereo via the
-# TensorRT two-stage route below: xyz + 2048 points.  The native-depth block
+# TensorRT plugin route below: xyz + 2048 points.  The native-depth block
 # remains commented so switching routes is explicit and cannot silently alter
 # the FFS runtime.
 
@@ -109,7 +109,7 @@ sampling:
 #     min_disparity_px: 0.001
 #     min_depth_m: 0.0
 #
-# 3. TensorRT two-stage route (active):
+# 3. TensorRT two-stage route (optional):
 # depth_source:
 #   mode: ffs_stereo
 #   ffs:
@@ -136,7 +136,7 @@ sampling:
 #     min_disparity_px: 0.001
 #     min_depth_m: 0.0
 #
-# 4. TensorRT plugin route (recommended FFS deployment route):
+# 4. TensorRT plugin route (active recommended FFS deployment route):
 depth_source:
   mode: ffs_stereo
   ffs:

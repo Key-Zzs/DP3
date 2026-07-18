@@ -519,9 +519,9 @@ Inference parameters live in
 Edit that file to select the checkpoint, robot config, GPU, optional duration limit,
 control rate, action scheduling, independent Flexiv startup/servo controls,
 inference-only scheduler and diffusion steps, safety limits, pre-connection
-policy warmup, point-cloud config, and Open3D visualization. The default runtime
-executes each configured action chunk at 15 Hz and enables the 200 Hz Flexiv
-Cartesian servo thread.
+policy warmup, point-cloud config, and the process-isolated Rerun monitor. The
+checked-in YAML uses the actual 10 Hz inference rate and leaves the Cartesian
+servo thread disabled unless explicitly enabled in the robot section.
 
 The current epsilon checkpoint is trained with DDPM but deployed with a DDIM
 scheduler reconstructed from the checkpoint beta schedule. DDIM uses 10 steps
@@ -608,9 +608,10 @@ bash scripts/run_flexiv_dual_arm_dp3_inference.sh
 This is the motion-producing `inference` path. It directly runs live RGB-D
 deprojection, crop, 2048-point sampling, policy prediction, action filtering,
 and `robot.send_action()`; it is separate from the no-motion perception-only
-entry point above. The default
-Open3D monitor runs in a separate process at 2 Hz with capacity-one latest-frame
-queues, so visualization cannot block the control loop.
+entry point above. The default Rerun telemetry child runs separately from the
+control loop. It receives fixed-shape latest-only samples through bounded
+shared-memory rings, so a slow or unavailable viewer cannot block policy
+prediction or action send.
 
 The formal launcher takes the live perception contract exclusively from the
 selected PointCloudBuilder YAML. In `native_depth` mode it keeps
@@ -645,6 +646,127 @@ move the robot. The software migration and automated tests do not replace the
 operator-run RealSense-only, Flexiv connection, and final closed-loop tests.
 Codex did not run any hardware connection, camera pipeline, or live inference
 command while implementing this migration.
+
+### Rerun monitor and synthetic benchmark
+
+The inference producer writes fixed-size RGB/depth, sampled point-cloud, state,
+policy-horizon, raw-action, filtered-action, commanded-action, and timing data
+to bounded `multiprocessing.shared_memory` rings. An independent non-daemon
+telemetry process owns Rerun initialization, Blueprint construction, Viewer
+management, serialization, and gRPC. Queue/Pipe/Event are control-only; large
+payloads do not pass through them. The consumer copies only the newest slot, so
+a slow or closed Viewer cannot stop robot inference.
+
+Core implementation:
+`visualizer/visualizer/monitor/{config,schema,shared_ring,client,process,rerun_sink,blueprint,benchmark}.py`.
+The old `tools/flexiv_dp3_live_viewer.py` path is only a deprecation shim.
+
+Install the optional dependencies:
+
+```bash
+python -m pip install -e "visualizer[monitor]"
+```
+
+Automatic local Viewer (default, port 9876):
+
+```yaml
+monitor:
+  enabled: true
+  viewer:
+    mode: spawn
+    port: 9876
+    memory_limit: 2GB
+    detach_process: true
+    activate_blueprint_on_start: true
+```
+
+The detached Viewer remains open after inference exits. A later inference run
+detects the listener on port 9876 and reconnects to the same window instead of
+spawning a duplicate. Close the Viewer window or its terminal explicitly when
+it is no longer needed.
+
+Manual local Viewer:
+
+```bash
+rerun --port 9876 --memory-limit 2GB
+```
+
+```yaml
+monitor:
+  viewer:
+    mode: connect
+    url: rerun+http://127.0.0.1:9876/proxy
+```
+
+Remote Viewer:
+
+```bash
+rerun --bind 0.0.0.0 --port 9876 --memory-limit 2GB
+```
+
+```yaml
+monitor:
+  viewer:
+    mode: connect
+    url: rerun+http://<viewer-ip>:9876/proxy
+```
+
+Use a trusted LAN/VPN or firewall restriction for a remote Viewer. Set
+`monitor.enabled: false` for a true no-op. The checked-in deployment profile
+publishes RGB/depth and the sampled cloud at 2 Hz and raw/cropped clouds at
+1 Hz. Raw/cropped display buffers are capped at 5,000 points each; this cap does
+not change the 2,048-point policy input. The sampled policy input is reused from
+the existing CPU NumPy result and the policy horizon is reused from the existing
+CPU NumPy action sequence. The Builder runs at most once per cycle.
+Viewer/telemetry failure is fail-open.
+
+The default Blueprint follows the newest `log_time` sample and separates state
+and actions by physical unit: joints `[rad]`, TCP/action xyz `[m]`, rotation-6D
+`[unitless]`, action rotvec `[rad]`, grippers `[0..1]`, and timing `[ms]`.
+Actions are logged in three stages: policy-selected
+(`/control/action_selected_raw`), safety-filtered
+(`/control/action_filtered`), and actually commanded
+(`/robot/action_commanded`). Keep `activate_blueprint_on_start: true` to apply
+the `log_time / Following` default at the start of every recording.
+
+The checked-in profile uses `min_bulk_slack_ms: 0` because publication happens
+after `robot.send_action()` and the measured normal monitor hot path is below
+0.4 ms p99. This prevents an already-overrunning 10 Hz inference loop from
+silently suppressing every RGB/depth/point-cloud update. The 1 Hz stage path can
+cost several milliseconds and is therefore rate-limited and display-truncated.
+If watchdog margin is insufficient on another machine, disable raw/cropped
+first or restore a positive slack threshold.
+
+`activate_blueprint_on_start: true` guarantees Following and makes all five
+image/point-cloud views active, but it reapplies the generated layout for each
+recording. To retain a hand-tuned layout, save an `.rbl` file, set
+`activate_blueprint_on_start: false`, and select Following manually. A manually
+started Viewer can load the saved Blueprint on every run:
+
+```bash
+conda run -n dp3 rerun /absolute/path/dp3_layout.rbl \
+  --port 9876 --memory-limit 2GB --persist-state
+```
+
+Set `monitor.viewer.mode: connect` and keep the same
+`monitor.recording.application_id` as the saved Blueprint, then run the normal
+inference script. With `activate_blueprint_on_start: false`, reconnecting does
+not replace the already-active Viewer layout.
+
+Run a synthetic benchmark (no Flexiv, RealSense, or action send):
+
+```bash
+python tools/benchmark_dp3_monitor.py
+```
+
+Reports are under `logs/monitor_benchmark/<timestamp>/` and include resolved
+configuration, system/GPU information, 5 Hz process samples, JSON/Markdown
+summary, p50/p95/p99/max publish latency and cycle jitter, deadline misses,
+drops/overwrites, effective rates, consumer heartbeat/lag, and
+producer/telemetry/Viewer CPU/RSS. The validated DP3 optional dependency is
+`rerun-sdk==0.34.1` with `psutil==7.2.2`.
+When a headless Viewer is used, the report is explicitly marked “headless
+viewer; not equivalent to visible native rendering”.
 
 See [docs/flexiv_dual_arm_inference.md](docs/flexiv_dual_arm_inference.md) for
 the parameter classification, runtime flow, and hardware stop behavior.

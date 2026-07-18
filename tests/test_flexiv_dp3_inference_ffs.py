@@ -372,7 +372,7 @@ def test_builder_camera_name_must_match_formal_flexiv_camera() -> None:
         (
             ROOT / "third_party/real/dual_flexiv_rizon4s/configs/data_config.yaml",
             "ffs_stereo",
-            "tensorrt_two_stage",
+            "tensorrt_plugin",
             "xyz",
         ),
         (
@@ -634,3 +634,262 @@ def test_config_check_summary_reports_native_and_ffs_routes() -> None:
     assert summary["point_cloud"]["ffs_backend"] == "pytorch"
     assert summary["artifacts"]["ffs"]["manifest_sha256"] == "a" * 64
     assert summary["inference_watchdogs"]["max_consecutive_timing_skips"] == 3
+
+
+class _InferenceCaptureMonitor:
+    def __init__(self, *, stages_enabled: bool):
+        self.enabled = True
+        self.config = SimpleNamespace(stages_enabled=stages_enabled)
+        self.published: list[dict[str, object]] = []
+        self.events: list[dict[str, object]] = []
+        self.closed = False
+
+    def plan_cycle(self, now):
+        return SimpleNamespace(stage_pointcloud_due=self.config.stages_enabled)
+
+    def publish_cycle(self, **kwargs):
+        self.published.append(kwargs)
+        return {"enabled": True, "control": True}
+
+    def publish_event(self, **kwargs):
+        self.events.append(kwargs)
+
+    def close(self):
+        self.closed = True
+
+
+class _InferenceFakeBuilder:
+    def __init__(self, *, points: int, point_dim: int):
+        self.points = points
+        self.point_dim = point_dim
+        self.base_calls = 0
+        self.stage_calls = 0
+        self.device = "cpu"
+        self.config = SimpleNamespace(device="cpu")
+        self.camera = SimpleNamespace(depth_scale=0.001)
+
+    def _result(self):
+        sampled = np.arange(self.points * self.point_dim, dtype=np.float32).reshape(
+            self.points, self.point_dim
+        )
+        meta = {
+            "stage": "sampled",
+            "num_raw_points": 12,
+            "num_cropped_points": 8,
+            "num_sampled_points": self.points,
+            "crop_empty": False,
+            "input_empty": False,
+            "padded": False,
+        }
+        return sampled, meta
+
+    def from_live_frame(self, frame):
+        self.base_calls += 1
+        return self._result()
+
+    def from_live_frame_with_stages(self, frame):
+        self.stage_calls += 1
+        sampled, meta = self._result()
+        stages = {
+            "raw": np.ones((12, self.point_dim), dtype=np.float32),
+            "cropped": np.ones((8, self.point_dim), dtype=np.float32),
+        }
+        return sampled, meta, stages
+
+
+class _InferenceFakeRobot:
+    def __init__(self, *, fail_send: bool = False):
+        self.config = SimpleNamespace(debug=True, use_gripper=False)
+        self.fail_send = fail_send
+        self.observation_count = 0
+        self.sent: list[dict[str, object]] = []
+        self.connected = False
+        self.released = False
+
+    def connect(self):
+        self.connected = True
+
+    def get_observation(self):
+        self.observation_count += 1
+        return {
+            "head_rgb": np.full((2, 3, 3), self.observation_count, dtype=np.uint8),
+            "sidecar.head_depth": np.full((2, 3), 1000, dtype=np.uint16),
+        }
+
+    def send_action(self, action):
+        if self.fail_send:
+            raise RuntimeError("synthetic send failure")
+        self.sent.append(action)
+
+    def release(self):
+        self.released = True
+
+
+def _run_fake_monitor_inference(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    stages_enabled: bool,
+    fail_send: bool = False,
+    num_steps: int = 3,
+):
+    points, point_dim, action_dim, horizon = 4, 3, 14, max(3, num_steps)
+    monitor = _InferenceCaptureMonitor(stages_enabled=stages_enabled)
+    builder = _InferenceFakeBuilder(points=points, point_dim=point_dim)
+    robot = _InferenceFakeRobot(fail_send=fail_send)
+    actions = np.arange(horizon * action_dim, dtype=np.float32).reshape(1, horizon, action_dim)
+    policy = SimpleNamespace(predict_action=lambda observation: {"action": launcher.torch.from_numpy(actions)})
+    contract = SimpleNamespace(
+        n_obs_steps=1,
+        state_dim=34,
+        action_dim=action_dim,
+        pointcloud_points=points,
+        pointcloud_dim=point_dim,
+    )
+    runtime = PointCloudRuntimeContract(
+        depth_source="native_depth",
+        output_format="xyz",
+        use_rgb=False,
+        num_points=points,
+        camera_name="head",
+    )
+    frame_counter = {"value": 0}
+    measured_state = np.zeros(34, dtype=np.float32)
+    measured_state[10:16] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    measured_state[27:33] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    measured_state[16] = measured_state[33] = 0.5
+
+    def fake_frame(observation, **kwargs):
+        frame_counter["value"] += 1
+        return {
+            "rgb": observation["head_rgb"],
+            "depth": observation["sidecar.head_depth"],
+            "timestamp": float(frame_counter["value"]),
+            "global_frame_index": frame_counter["value"],
+            "frame_index": frame_counter["value"],
+            "depth_source": "native_depth",
+        }
+
+    monkeypatch.setattr(launcher, "_start_monitor", lambda *args, **kwargs: monitor)
+    monkeypatch.setattr(launcher, "build_pointcloud_frame_from_observation", fake_frame)
+    monkeypatch.setattr(launcher, "build_agent_pos", lambda *args, **kwargs: measured_state.copy())
+    monkeypatch.setattr(launcher, "history_to_policy_obs", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        launcher,
+        "filter_action_vector",
+        lambda raw, limits: (np.asarray(raw, dtype=np.float32) * 0.5, {"synthetic": True}),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "action_vector_to_flexiv_dict",
+        lambda safe: {"safe": np.asarray(safe, dtype=np.float32).tolist()},
+    )
+    args = SimpleNamespace(
+        mode="mock",
+        action_mode="chunk",
+        inference_scheduler="ddim",
+        camera_name="head_rgb",
+        rgb_key=None,
+        depth_key=None,
+        allow_reused_rgbd=False,
+        default_gripper_state=0.5,
+        read_gripper_state=False,
+        stop_file=None,
+        summary_jsonl=tmp_path / "fake_inference.jsonl",
+        overwrite_summary_jsonl=True,
+        num_steps=num_steps,
+        rate_hz=1000.0,
+        sampled_pointcloud_dir=None,
+        control_debug_enabled=False,
+        max_consecutive_timing_skips=3,
+    )
+    limits = launcher.SafetyLimits(low_speed_scale=1.0)
+    if fail_send:
+        with pytest.raises(RuntimeError, match="synthetic send failure"):
+            launcher._run_inference_loop(
+                args=args,
+                robot=robot,
+                policy=policy,
+                builder=builder,
+                contract=contract,
+                device=launcher.torch.device("cpu"),
+                limits=limits,
+                connect_robot=True,
+                runtime_contract=runtime,
+            )
+    else:
+        assert launcher._run_inference_loop(
+            args=args,
+            robot=robot,
+            policy=policy,
+            builder=builder,
+            contract=contract,
+            device=launcher.torch.device("cpu"),
+            limits=limits,
+            connect_robot=True,
+            runtime_contract=runtime,
+        ) == 0
+    return monitor, builder, robot, actions[0], measured_state
+
+
+def test_fake_inference_monitor_preserves_horizon_chunk_and_action_semantics(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monitor, builder, robot, horizon, measured_state = _run_fake_monitor_inference(
+        monkeypatch,
+        tmp_path,
+        stages_enabled=False,
+    )
+
+    assert robot.connected and robot.released
+    assert monitor.closed
+    assert builder.base_calls == 3
+    assert builder.stage_calls == 0
+    assert len(monitor.published) == len(robot.sent) == 3
+    np.testing.assert_array_equal(monitor.published[0]["policy_horizon"], horizon)
+    assert monitor.published[1]["policy_horizon"] is None
+    assert [item["prediction_id"] for item in monitor.published] == [1, 1, 1]
+    assert [item["selected_action_index"] for item in monitor.published] == [0, 1, 2]
+    for index, item in enumerate(monitor.published):
+        np.testing.assert_array_equal(item["measured_state"], measured_state)
+        assert item["rgb"].shape == (2, 3, 3)
+        assert item["depth"].shape == (2, 3)
+        assert item["sampled_pointcloud"].shape == (4, 3)
+        np.testing.assert_array_equal(item["selected_raw_action"], horizon[index])
+        np.testing.assert_array_equal(item["filtered_action"], horizon[index] * 0.5)
+        np.testing.assert_array_equal(item["commanded_action"], horizon[index] * 0.5)
+        assert item["commanded_valid"] is True
+
+
+def test_fake_inference_stage_capture_calls_builder_once_per_cycle(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monitor, builder, robot, _, _ = _run_fake_monitor_inference(
+        monkeypatch,
+        tmp_path,
+        stages_enabled=True,
+        num_steps=2,
+    )
+
+    assert robot.released and monitor.closed
+    assert builder.base_calls == 0
+    assert builder.stage_calls == 2
+    assert all(item["stages"] is not None for item in monitor.published)
+
+
+def test_fake_inference_send_error_never_marks_command_valid_and_still_releases(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monitor, builder, robot, _, _ = _run_fake_monitor_inference(
+        monkeypatch,
+        tmp_path,
+        stages_enabled=False,
+        fail_send=True,
+        num_steps=1,
+    )
+
+    assert builder.base_calls == 1 and builder.stage_calls == 0
+    assert robot.released and monitor.closed
+    assert len(monitor.published) == 1
+    assert monitor.published[0]["send_status"] == "send_error"
+    assert monitor.published[0]["commanded_valid"] is False

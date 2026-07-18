@@ -164,9 +164,63 @@ control_debug:
   queue_size: 8192
   flush_interval_sec: 1.0
 
-visualization:
+# Process-isolated latest-only telemetry.  The producer never imports Rerun;
+# only the independent child process initializes the SDK and manages a Viewer.
+monitor:
   enabled: true
-  rate_hz: 2
-  max_raw_points: 30000
-  max_cropped_points: 30000
-  point_size: 3
+  backend: rerun
+  fail_open: true
+  startup_timeout_sec: 5.0
+  shutdown_timeout_sec: 3.0
+  # Publish low-rate diagnostics after action send even when the 10 Hz loop has
+  # no sleep slack. Current measured transport p99 is below 0.4 ms normally;
+  # the 1 Hz raw/cropped D2H path is capped separately below.
+  min_bulk_slack_ms: 0.0
+  heartbeat_interval_sec: 1.0
+  ring:
+    capacity: 3
+  viewer:
+    mode: spawn # spawn | connect
+    url: rerun+http://127.0.0.1:9876/proxy
+    port: 9876
+    memory_limit: 2GB
+    server_memory_limit: 512MB
+    hide_welcome_screen: true
+    # Keep Rerun open after inference exits; the next run reuses port 9876.
+    detach_process: true
+    # Ensures the time cursor follows current data. Set false only to preserve
+    # an already-active hand-tuned layout, then select Following manually.
+    activate_blueprint_on_start: false
+    reconnect_attempts: 3
+    reconnect_interval_sec: 1.0
+  rates:
+    control_hz: ${inference.rate_hz}
+    # Low display rates keep the native Viewer responsive while still updating
+    # RGB/depth and all three point-cloud stages during inference.
+    camera_hz: 2.0
+    sampled_pointcloud_hz: 2.0
+    stage_pointcloud_hz: 1.0
+    health_hz: 1.0
+  payloads:
+    state: true
+    rgb: true
+    depth: true
+    sampled_pointcloud: true
+    # Enabled at only 1 Hz and truncated to 5000 display points below. This
+    # affects monitoring only; sampled policy input remains exactly 2048 points.
+    raw_pointcloud: false
+    cropped_pointcloud: false
+    policy_horizon: true
+    selected_action: true
+    filtered_action: true
+    commanded_action: true
+    timing: true
+  display:
+    # These limits affect display only, never the 2048-point policy input.
+    max_raw_points: 5000
+    max_cropped_points: 5000
+    point_radius: 0.003
+  recording:
+    application_id: flexiv_dp3_monitor
+    save_rrd: false
+    rrd_path: null

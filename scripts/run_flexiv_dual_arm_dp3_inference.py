@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import site
+import subprocess
 import sys
 import time
 import types
@@ -31,6 +32,7 @@ from omegaconf import OmegaConf
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DP3_ROOT = REPO_ROOT / "3D-Diffusion-Policy"
 POINTCLOUD_BUILDER_ROOT = REPO_ROOT / "PointCloudBuilder"
+VISUALIZER_ROOT = REPO_ROOT / "visualizer"
 DEFAULT_INFERENCE_CONFIG = (
     DP3_ROOT / "diffusion_policy_3d/config/dp3_inference_config.yaml"
 )
@@ -51,7 +53,7 @@ def _resolve_flexiv_interface_dir(repo_root: Path = REPO_ROOT) -> Path:
 
 FLEXIV_INTERFACE_DIR = _resolve_flexiv_interface_dir()
 
-for path in (REPO_ROOT, DP3_ROOT, POINTCLOUD_BUILDER_ROOT):
+for path in (REPO_ROOT, DP3_ROOT, POINTCLOUD_BUILDER_ROOT, VISUALIZER_ROOT):
     if path.exists():
         sys.path.insert(0, str(path))
 
@@ -78,14 +80,16 @@ from diffusion_policy_3d.real_world.flexiv_dual_arm_dp3 import (  # noqa: E402
 )
 from pointcloud_builder import PointCloudBuilder  # noqa: E402
 from pointcloud_builder.config import load_config as load_pointcloud_config  # noqa: E402
-from tools.flexiv_dp3_live_viewer import (  # noqa: E402
-    LiveVisualizationPublisher,
-    ViewerConfig,
+from visualizer.monitor import (  # noqa: E402
+    MonitorClient,
+    MonitorConfig,
+    TelemetryShapes,
+    load_monitor_config,
 )
 LOGGER = logging.getLogger("flexiv_dp3_inference")
 FUTURE_WALL_TIME_TOLERANCE_S = 0.25
-MAX_OPEN3D_VISUALIZATION_RATE_HZ = 2.0
-MAX_OPEN3D_DISPLAY_POINTS = 50_000
+MAX_MONITOR_RATE_HZ = 1000.0
+MAX_MONITOR_DISPLAY_POINTS = 1_000_000
 
 CLI_DESCRIPTION = """Run Flexiv dual-arm DP3 inference.
 
@@ -112,6 +116,8 @@ class _QueuedAction:
     camera_frame_left_ir_index: int | None
     camera_frame_right_ir_index: int | None
     point_cloud_padded: bool = False
+    prediction_id: int = -1
+    horizon: Any | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -146,7 +152,7 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
     robot = _required_mapping(cfg, "robot", config_path)
     pointcloud = _required_mapping(cfg, "pointcloud", config_path)
     inference = _required_mapping(cfg, "inference", config_path)
-    visualization = _required_mapping(cfg, "visualization", config_path)
+    monitor_config = load_monitor_config(cfg, inference_rate_hz=float(inference["rate_hz"]))
     control_debug = cfg.get("control_debug", {})
     if not isinstance(control_debug, dict):
         raise SystemExit(f"`control_debug` must be a mapping in inference config: {config_path}")
@@ -209,11 +215,8 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         ),
         sampled_pointcloud_dir=None,
         sampled_pointcloud_every=1,
-        visualize_live=bool(visualization["enabled"]) and not check_config,
-        visualization_rate_hz=float(visualization["rate_hz"]),
-        visualization_max_raw_points=int(visualization["max_raw_points"]),
-        visualization_max_cropped_points=int(visualization["max_cropped_points"]),
-        visualization_point_size=float(visualization["point_size"]),
+        monitor_config=monitor_config,
+        visualize_live=bool(monitor_config.enabled) and not check_config,
         allow_reused_rgbd=False,
         max_policy_latency_ms=float(inference["max_policy_latency_ms"]),
         max_camera_frame_age_ms=float(inference["max_camera_frame_age_ms"]),
@@ -346,7 +349,17 @@ def _plain_config_value(value: Any) -> Any:
 
 def main() -> int:
     args = parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s %(levelname)s %(message)s")
+    log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+    runtime_log_path: Path | None = None
+    if args.summary_jsonl is not None:
+        runtime_log_path = Path(args.summary_jsonl).with_suffix(".log")
+        runtime_log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handlers.append(logging.FileHandler(runtime_log_path, mode="a", encoding="utf-8"))
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=log_handlers,
+    )
 
     _validate_args(args)
     _validate_input_files(args)
@@ -474,6 +487,8 @@ def main() -> int:
 
     print(f"[inference] checkpoint: {_display_path(args.ckpt)}")
     print(f"[inference] log: {_display_path(args.summary_jsonl)}")
+    if runtime_log_path is not None:
+        print(f"[inference] runtime log: {_display_path(runtime_log_path)}")
     if args.control_debug_enabled:
         print(f"[inference] control trace: {_display_path(args.control_trace_jsonl)}")
     duration_label = (
@@ -676,29 +691,23 @@ def _validate_args(args: argparse.Namespace) -> None:
         args.sampled_pointcloud_every,
         label="--sampled-pointcloud-every",
     )
-    args.visualization_rate_hz = _positive_float(
-        args.visualization_rate_hz,
-        label="--visualization-rate-hz",
-    )
-    if args.visualization_rate_hz > MAX_OPEN3D_VISUALIZATION_RATE_HZ:
-        raise SystemExit(
-            "--visualization-rate-hz must be <= "
-            f"{MAX_OPEN3D_VISUALIZATION_RATE_HZ:g} to protect the inference loop"
-        )
-    for name in ("visualization_max_raw_points", "visualization_max_cropped_points"):
-        value = _positive_int(
-            getattr(args, name),
-            label=f"--{name.replace('_', '-')}",
-        )
-        if value > MAX_OPEN3D_DISPLAY_POINTS:
-            raise SystemExit(
-                f"--{name.replace('_', '-')} must be <= {MAX_OPEN3D_DISPLAY_POINTS}"
-            )
-        setattr(args, name, value)
-    args.visualization_point_size = _positive_float(
-        args.visualization_point_size,
-        label="--visualization-point-size",
-    )
+    monitor_config = getattr(args, "monitor_config", None)
+    if not isinstance(monitor_config, MonitorConfig):
+        raise SystemExit("Inference config is missing a validated monitor section")
+    for name, value in (
+        ("control_hz", monitor_config.rates.control_hz),
+        ("camera_hz", monitor_config.rates.camera_hz),
+        ("sampled_pointcloud_hz", monitor_config.rates.sampled_pointcloud_hz),
+        ("stage_pointcloud_hz", monitor_config.rates.stage_pointcloud_hz),
+    ):
+        if float(value) > MAX_MONITOR_RATE_HZ:
+            raise SystemExit(f"monitor.rates.{name} exceeds {MAX_MONITOR_RATE_HZ:g}")
+    for name, value in (
+        ("max_raw_points", monitor_config.display.max_raw_points),
+        ("max_cropped_points", monitor_config.display.max_cropped_points),
+    ):
+        if int(value) > MAX_MONITOR_DISPLAY_POINTS:
+            raise SystemExit(f"monitor.display.{name} exceeds {MAX_MONITOR_DISPLAY_POINTS}")
     if args.num_inference_steps is not None:
         args.num_inference_steps = _positive_int(
             args.num_inference_steps,
@@ -792,8 +801,9 @@ def _run_inference_loop(
         getattr(args, "summary_jsonl", None),
         overwrite=getattr(args, "overwrite_summary_jsonl", False),
     )
-    visualization = _start_live_visualization(args, builder)
+    monitor = _start_monitor(args, builder, contract, runtime_contract)
     consecutive_timing_safety_skips = 0
+    prediction_counter = 0
 
     try:
         if stop_path is not None and stop_path.exists():
@@ -810,6 +820,7 @@ def _run_inference_loop(
         step_indices = itertools.count() if args.num_steps is None else range(args.num_steps)
         for step_idx in step_indices:
             step_start = time.monotonic()
+            monitor_plan = monitor.plan_cycle(step_start)
             if stop_path is not None and stop_path.exists():
                 summary = {
                     "step": step_idx,
@@ -832,7 +843,7 @@ def _run_inference_loop(
             agent_pos_summary = None
             camera_frame_summary = None
             predicted_chunk = False
-            visualization_stages = None
+            monitor_stages = None
             pointcloud_build_ms = None
             policy_predict_ms = None
 
@@ -904,10 +915,15 @@ def _run_inference_loop(
                     _write_summary(summary, summary_file)
                     raise RuntimeError(f"{reuse_reason} Fix camera streaming before inference.")
                 pointcloud_started = time.monotonic()
-                if visualization is None:
+                capture_stages = bool(
+                    monitor.enabled
+                    and monitor.config.stages_enabled
+                    and monitor_plan.stage_pointcloud_due
+                )
+                if not capture_stages:
                     point_cloud, pc_meta = builder.from_live_frame(frame)
                 else:
-                    point_cloud, pc_meta, visualization_stages = (
+                    point_cloud, pc_meta, monitor_stages = (
                         builder.from_live_frame_with_stages(frame)
                     )
                 pointcloud_build_ms = (time.monotonic() - pointcloud_started) * 1000.0
@@ -944,6 +960,7 @@ def _run_inference_loop(
                     action_seq = _policy_action_sequence(result, contract)
                     policy_predict_ms = (time.monotonic() - policy_started) * 1000.0
                     predicted_at = time.monotonic()
+                    prediction_counter += 1
                     if args.action_mode == "chunk":
                         action_queue.extend(
                             _QueuedAction(
@@ -988,6 +1005,8 @@ def _run_inference_loop(
                                     "right_ir_frame_index",
                                 ),
                                 point_cloud_padded=bool(pc_meta.get("padded")),
+                                prediction_id=prediction_counter,
+                                horizon=action_seq,
                             )
                             for idx, action in enumerate(action_seq)
                         )
@@ -1036,6 +1055,8 @@ def _run_inference_loop(
                                     "right_ir_frame_index",
                                 ),
                                 point_cloud_padded=bool(pc_meta.get("padded")),
+                                prediction_id=prediction_counter,
+                                horizon=action_seq,
                             )
                         )
                     predicted_chunk = True
@@ -1065,18 +1086,6 @@ def _run_inference_loop(
                 )
                 if dump_summary is not None:
                     point_cloud_summary["dump"] = dump_summary
-                if visualization is not None and visualization_stages is not None:
-                    point_cloud_summary["visualization"] = visualization.maybe_publish(
-                        step_idx=step_idx,
-                        depth=_visualization_depth_from_observation(
-                            observation,
-                            camera_name=args.camera_name,
-                        ),
-                        stages=visualization_stages,
-                        sampled_point_cloud=pc_np,
-                        pointcloud_meta=pc_meta,
-                    )
-
             queued_action = action_queue.popleft()
             raw_action = queued_action.vector
             safe_action, diagnostics = filter_action_vector(raw_action, limits)
@@ -1129,6 +1138,11 @@ def _run_inference_loop(
             if stop_path is not None and stop_path.exists():
                 summary["send_status"] = "skipped_stop_file_after_inference"
                 summary["send_error"] = f"Stop file exists after inference: {stop_path}; skip send"
+                monitor.publish_event(
+                    cycle_id=int(step_idx),
+                    status="skipped_stop_file_after_inference",
+                    message=summary["send_error"],
+                )
                 _add_cycle_timing_summary(summary, step_start, period_s)
                 _write_summary(summary, summary_file)
                 LOGGER.warning("Stop file exists after inference at step %d: %s; skip send", step_idx, stop_path)
@@ -1139,6 +1153,11 @@ def _run_inference_loop(
             except RuntimeError as exc:
                 summary["send_status"] = "skipped_pointcloud_safety"
                 summary["send_error"] = str(exc)
+                monitor.publish_event(
+                    cycle_id=int(step_idx),
+                    status="send_skipped",
+                    message=summary["send_error"],
+                )
                 _add_cycle_timing_summary(summary, step_start, period_s)
                 _write_summary(summary, summary_file)
                 raise
@@ -1164,6 +1183,11 @@ def _run_inference_loop(
                     if consecutive_timing_safety_skips
                     >= args.max_consecutive_timing_skips
                     else "repredict"
+                )
+                monitor.publish_event(
+                    cycle_id=int(step_idx),
+                    status="skipped_timing_safety",
+                    message=summary["send_error"],
                 )
                 _add_cycle_timing_summary(summary, step_start, period_s)
                 _write_summary(summary, summary_file)
@@ -1223,6 +1247,24 @@ def _run_inference_loop(
                 )
                 summary["send_status"] = "send_error"
                 summary["send_error"] = str(exc)
+                monitor.publish_cycle(
+                    cycle_id=int(step_idx),
+                    measured_state=agent_pos,
+                    policy_horizon=queued_action.horizon if predicted_chunk else None,
+                    prediction_id=queued_action.prediction_id,
+                    selected_action_index=queued_action.chunk_index,
+                    selected_raw_action=raw_action,
+                    filtered_action=safe_action,
+                    commanded_action=safe_action,
+                    commanded_valid=False,
+                    send_status="send_error",
+                    pointcloud_meta=point_cloud_summary or {},
+                    rgb=None,
+                    depth=None,
+                    timings=_monitor_timings(summary),
+                    plan=monitor_plan,
+                    remaining_slack_ms=max(0.0, (period_s - (time.monotonic() - step_start)) * 1000.0),
+                )
                 _add_cycle_timing_summary(summary, step_start, period_s)
                 _write_summary(summary, summary_file)
                 raise
@@ -1231,6 +1273,35 @@ def _run_inference_loop(
             summary["send_status"] = "sent"
             consecutive_timing_safety_skips = 0
             _add_cycle_timing_summary(summary, step_start, period_s)
+            monitor.publish_cycle(
+                cycle_id=int(step_idx),
+                measured_state=agent_pos,
+                rgb=frame.get("rgb") if "frame" in locals() else None,
+                depth=(
+                    frame.get("depth")
+                    if "frame" in locals() and isinstance(frame, Mapping) and "depth" in frame
+                    else _safe_monitor_depth(observation, camera_name=args.camera_name)
+                    if "observation" in locals()
+                    else None
+                ),
+                depth_scale=float(getattr(getattr(builder, "camera", None), "depth_scale", 0.0)),
+                frame_index=int(_summary_int(camera_frame_summary, "global_frame_index") or -1),
+                sampled_pointcloud=pc_np if "pc_np" in locals() else None,
+                pointcloud_meta=point_cloud_summary or {},
+                stages=monitor_stages,
+                policy_horizon=queued_action.horizon if predicted_chunk else None,
+                prediction_id=queued_action.prediction_id,
+                selected_action_index=queued_action.chunk_index,
+                selected_raw_action=raw_action,
+                filtered_action=safe_action,
+                commanded_action=safe_action,
+                commanded_valid=True,
+                send_status="sent",
+                observation_timestamp=float(_summary_float(camera_frame_summary, "timestamp") or 0.0),
+                timings=_monitor_timings(summary),
+                plan=monitor_plan,
+                remaining_slack_ms=max(0.0, (period_s - (time.monotonic() - step_start)) * 1000.0),
+            )
             runtime_safety_error = _inference_runtime_safety_error(args, summary)
             if runtime_safety_error is not None:
                 summary["runtime_safety_error"] = runtime_safety_error
@@ -1254,8 +1325,7 @@ def _run_inference_loop(
                     if not active_error:
                         release_error = exc
         finally:
-            if visualization is not None:
-                visualization.close()
+            monitor.close()
             if summary_file is not None:
                 summary_empty = summary_file.tell() == 0
                 summary_path = Path(summary_file.name)
@@ -1367,46 +1437,129 @@ def _warmup_pointcloud_builder(
     )
 
 
-def _start_live_visualization(
+def _start_monitor(
     args: argparse.Namespace,
     builder: PointCloudBuilder,
-) -> LiveVisualizationPublisher | None:
-    if not bool(getattr(args, "visualize_live", False)):
-        return None
-
+    contract: Any,
+    runtime_contract: PointCloudRuntimeContract,
+) -> MonitorClient:
+    config = getattr(args, "monitor_config", MonitorConfig(enabled=False))
+    if not config.enabled or bool(getattr(args, "check_config", False)):
+        return MonitorClient.disabled(config)
     camera = builder.camera
-    intrinsics = camera.active_intrinsics
-    config = ViewerConfig(
-        title=f"DP3 Live Perception | {args.mode}",
-        camera_width=int(camera.width),
+    policy_cfg = args.inference_config.get("policy", {})
+    policy_horizon = int(policy_cfg.get("horizon", contract.action_dim))
+    shapes = TelemetryShapes(
         camera_height=int(camera.height),
-        camera_fx=float(intrinsics.fx),
-        camera_fy=float(intrinsics.fy),
-        camera_cx=float(intrinsics.cx),
-        camera_cy=float(intrinsics.cy),
-        depth_scale=float(camera.depth_scale),
-        point_size=float(args.visualization_point_size),
+        camera_width=int(camera.width),
+        point_count=int(contract.pointcloud_points),
+        point_dim=int(contract.pointcloud_dim),
+        state_dim=int(contract.state_dim),
+        action_dim=int(contract.action_dim),
+        policy_horizon=policy_horizon,
+        depth_dtype=config.depth_dtype,
+        max_raw_points=int(config.display.max_raw_points),
+        max_cropped_points=int(config.display.max_cropped_points),
     )
-    publisher = LiveVisualizationPublisher(
-        rate_hz=float(args.visualization_rate_hz),
-        max_raw_points=int(args.visualization_max_raw_points),
-        max_cropped_points=int(args.visualization_max_cropped_points),
-        viewer_config=config,
-    )
+    intrinsics = camera.active_intrinsics
+    static_metadata = {
+        "git_sha": _repo_git_sha(),
+        "config_path": str(args.config_path),
+        "state_field_names": list(STATE_FIELD_NAMES),
+        "action_field_names": list(ACTION_FIELD_NAMES),
+        "pointcloud_shapes": {
+            "sampled": [shapes.point_count, shapes.point_dim],
+            "raw_max": [shapes.max_raw_points, shapes.point_dim],
+            "cropped_max": [shapes.max_cropped_points, shapes.point_dim],
+        },
+        "camera_contract": {
+            "name": runtime_contract.camera_name,
+            "width": shapes.camera_width,
+            "height": shapes.camera_height,
+            "depth_scale": float(camera.depth_scale),
+            "depth_source": runtime_contract.depth_source,
+            "xyz_frame": "camera",
+            "intrinsics": {
+                "fx": float(intrinsics.fx),
+                "fy": float(intrinsics.fy),
+                "cx": float(intrinsics.cx),
+                "cy": float(intrinsics.cy),
+            },
+        },
+    }
     try:
-        publisher.start()
+        client = MonitorClient.create(
+            config,
+            shapes,
+            static_metadata=static_metadata,
+            sink_kind=config.backend,
+        )
+        if not client.enabled:
+            LOGGER.warning(
+                "DP3 telemetry is disabled after a fail-open startup failure; "
+                "inference will continue without Rerun data"
+            )
+            return client
+        LOGGER.info(
+            "DP3 telemetry started pid=%s mode=%s control_hz=%.1f camera_hz=%.1f sampled_hz=%.1f stages=%s",
+            client.process.pid if client.process is not None else None,
+            config.viewer.mode,
+            config.rates.control_hz,
+            config.rates.camera_hz,
+            config.rates.sampled_pointcloud_hz,
+            config.stages_enabled,
+        )
+        return client
     except Exception:  # noqa: BLE001
-        LOGGER.exception("Live viewer failed to start; inference will continue without it")
-        publisher.close()
-        return None
-    LOGGER.info(
-        "Live viewer started pid=%s rate_hz=%.1f raw_display_max=%d cropped_display_max=%d",
-        publisher.viewer_pid,
-        publisher.rate_hz,
-        publisher.max_raw_points,
-        publisher.max_cropped_points,
+        LOGGER.exception("Telemetry startup failed; inference will continue fail-open")
+        if not config.fail_open:
+            raise
+        return MonitorClient.disabled(config)
+
+
+def _repo_git_sha() -> str:
+    """Resolve deployment source identity once, outside the control hot path."""
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def _monitor_timings(summary: Mapping[str, Any]) -> dict[str, float]:
+    names = (
+        "pointcloud_build_ms",
+        "policy_predict_ms",
+        "policy_latency_ms",
+        "action_age_ms",
+        "camera_frame_age_ms",
+        "send_duration_ms",
+        "cycle_time_ms",
+        "loop_overrun_ms",
     )
-    return publisher
+    result: dict[str, float] = {}
+    for name in names:
+        value = summary.get(name)
+        if value is None:
+            continue
+        try:
+            result[name] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _safe_monitor_depth(observation: Mapping[str, Any], *, camera_name: str) -> Any | None:
+    try:
+        return _visualization_depth_from_observation(observation, camera_name=camera_name)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _enforce_runtime_inference_gates(

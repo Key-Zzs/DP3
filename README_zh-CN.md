@@ -473,8 +473,8 @@ checkpoint:
 `3D-Diffusion-Policy/diffusion_policy_3d/config/dp3_inference_config.yaml`。
 在该文件中设置 checkpoint、机器人配置、GPU、可选运行时长上限、控制频率、
 动作队列模式、Flexiv 启动/servo 独立开关、推理专用 scheduler 与反向扩散步数、连接
-机器人前的策略 warmup、动作限幅、点云配置和 Open3D 可视化。默认以 15 Hz 依次执行
-配置的 action chunk，并启用 200 Hz Flexiv 笛卡尔 servo thread。
+机器人前的策略 warmup、动作限幅、点云配置和进程隔离的 Rerun 监控。当前默认以
+10 Hz 依次执行配置的 action chunk；Flexiv 笛卡尔 servo thread 只有显式配置后才启用。
 
 当前 epsilon checkpoint 使用 DDPM 训练，但部署时根据 checkpoint 的 beta schedule
 重建 DDIM scheduler。DDIM 10 步的 batch-1 推理约为 39--40 ms；不要替换成 DDPM
@@ -549,8 +549,8 @@ bash scripts/run_flexiv_dual_arm_dp3_inference.sh
 
 这是会产生机器人运动的 `inference` 流程，会直接执行实时 RGB-D 反投影、裁剪、
 2048 点采样、策略预测、动作过滤和 `robot.send_action()`；它与上述独立的无动作
-perception-only 检查是两个入口。默认 Open3D 显示进程以 2 Hz 运行，通过容量为 1 的 latest-frame
-队列接收数据，不会阻塞控制循环。
+perception-only 检查是两个入口。默认 Rerun telemetry 子进程通过固定大小的
+shared-memory latest-only ring 接收数据，Viewer 卡顿或退出不会阻塞策略预测和 action send。
 
 正式 launcher 的 live perception contract 完全来自所选 PointCloudBuilder YAML。
 `native_depth` 模式保持 `use_depth=true` 且不启用 IR；`ffs_stereo` 模式打开左右
@@ -561,6 +561,116 @@ IR，并从同一次采集取得同步的 RGB/depth/left-IR/right-IR frameset。
 `xyzrgb` 时附带 RGB；native depth 不会传给 FFS Builder，也不会作为 fallback。
 启动阶段会在连接机器人前校验 backend artifact、相机几何、帧 metadata、checkpoint
 点云维度（`xyz=3`、`xyzrgb=6`）和固定点数。
+
+### Rerun 实时监控
+
+监控架构为：
+
+```text
+DP3 inference/control
+        | 非阻塞固定大小写入
+        v
+multiprocessing.shared_memory latest-only rings（容量 3）
+        v
+独立 telemetry process
+        +--> 本机 Viewer（spawn）
+        +--> 手动或远端 Viewer（connect_grpc）
+```
+
+推理进程不导入 Rerun，也不调用 `rr.log`。RGB、depth、state、action、policy horizon
+和点云只通过预分配共享内存传输；Queue/Pipe 仅传递 ready、stop、error 和 heartbeat
+等少量控制消息。消费者只读取最新 slot，不回放积压帧。
+
+安装可选依赖：
+
+```bash
+conda activate dp3
+python -m pip install -e "visualizer[monitor]"
+```
+
+默认自动启动本机 Viewer：
+
+```yaml
+monitor:
+  enabled: true
+  min_bulk_slack_ms: 0.0
+  viewer:
+    mode: spawn
+    port: 9876
+    memory_limit: 2GB
+    detach_process: true
+    activate_blueprint_on_start: true
+```
+
+`detach_process: true` 表示推理结束后只断开本次 recording，不关闭 Rerun 窗口；下次
+推理检测到 9876 已有 Viewer 后会直接复用。只有手动关闭 Viewer 窗口或其启动终端时
+才会退出。`activate_blueprint_on_start: true` 会在每次 recording 开始时应用默认布局，
+并把时间线设为 `log_time / Following`，防止运行期间停在空白旧时间点。
+
+当前低负载实时显示配置为：
+
+```yaml
+monitor:
+  rates:
+    control_hz: ${inference.rate_hz}
+    camera_hz: 2.0
+    sampled_pointcloud_hz: 2.0
+    stage_pointcloud_hz: 1.0
+  payloads:
+    rgb: true
+    depth: true
+    sampled_pointcloud: true
+    raw_pointcloud: true
+    cropped_pointcloud: true
+  display:
+    max_raw_points: 5000
+    max_cropped_points: 5000
+```
+
+因此 RGB、depth、sampled point cloud 以最高 2 Hz 更新，raw/cropped 以最高 1 Hz
+更新。5000 点上限只影响显示，不改变策略实际使用的 2048 点输入。当前使用
+`min_bulk_slack_ms: 0`，是因为所有 bulk publish 都发生在 `robot.send_action()` 之后，
+且普通监控发布实测 p99 小于 0.4 ms；之前设为 5 ms 时，现有约 126 ms 的推理周期
+没有剩余 slack，导致 RGB/depth/点云几乎全部被跳过。如果另一台机器的 watchdog
+余量不足，优先关闭 raw/cropped，或恢复正的 slack 阈值。
+
+默认 Blueprint 中各纵轴单位为：joint 和 action rotvec 使用弧度，TCP/action xyz 使用
+米，rotation-6D 无量纲，夹爪为 `[0,1]`，timing 为毫秒。若要保留手工调整后的布局，
+先保存 `.rbl`，再设置 `activate_blueprint_on_start: false`，并在 Viewer 中手动选择
+Following。
+
+本机手动 Viewer：
+
+```bash
+rerun --port 9876 --memory-limit 2GB
+```
+
+```yaml
+monitor:
+  viewer:
+    mode: connect
+    url: rerun+http://127.0.0.1:9876/proxy
+```
+
+远端 Viewer 主机运行：
+
+```bash
+rerun --bind 0.0.0.0 --port 9876 --memory-limit 2GB
+```
+
+推理主机设置 `monitor.viewer.mode: connect` 和
+`monitor.viewer.url: rerun+http://<viewer-ip>:9876/proxy`。只应通过可信局域网、VPN
+或防火墙受限端口连接。
+
+完全 synthetic、不会连接 Flexiv/RealSense 或发送 action 的资源基准：
+
+```bash
+python tools/benchmark_dp3_monitor.py
+```
+
+报告写入 `logs/monitor_benchmark/<timestamp>/`。其中分别统计 producer、telemetry 和
+Viewer 的 CPU/RSS，以及 publish 延迟、周期抖动、deadline miss、drop/overwrite 和
+实际发布率。
 
 默认配置会持续闭环推理，直到在当前终端按 `Ctrl+C`。启动器也会打印 JSONL 日志位置
 和停止命令；也可以在另一个终端执行：
