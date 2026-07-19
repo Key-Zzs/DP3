@@ -193,6 +193,9 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         action_mode=str(inference["action_mode"]),
         n_action_steps=cfg["policy"]["n_action_steps"],
         temporal_ensemble_coeff=float(inference.get("temporal_ensemble_coeff", 0.0)),
+        temporal_ensemble_ramp_weights=bool(
+            inference.get("temporal_ensemble_ramp_weights", False)
+        ),
         use_ema=bool(cfg["use_ema"]),
         check_config=bool(check_config),
         camera_name=str(robot.get("camera_name", "head_rgb")),
@@ -506,7 +509,8 @@ def main() -> int:
         f"action_mode={args.action_mode} scheduler={scheduler_class} "
         f"diffusion_steps={policy.num_inference_steps} "
         f"n_action_steps={policy.n_action_steps} "
-        f"temporal_ensemble_coeff={args.temporal_ensemble_coeff:g}"
+        f"temporal_ensemble_coeff={args.temporal_ensemble_coeff:g} "
+        f"temporal_ensemble_ramp_weights={args.temporal_ensemble_ramp_weights}"
     )
     robot = _make_flexiv_robot(args, builder, runtime_contract)
     limits = SafetyLimits(
@@ -610,6 +614,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         label="inference.temporal_ensemble_coeff",
         minimum=0.0,
         maximum=1.0,
+    )
+    args.temporal_ensemble_ramp_weights = bool(
+        getattr(args, "temporal_ensemble_ramp_weights", False)
     )
     if args.temporal_ensemble_coeff > 0.0 and args.action_mode != "chunk":
         raise SystemExit(
@@ -982,6 +989,11 @@ def _run_inference_loop(
                                 contract,
                                 n_action_steps=getattr(args, "n_action_steps", 0),
                                 coeff=getattr(args, "temporal_ensemble_coeff", 0.0),
+                                ramp_weights=getattr(
+                                    args,
+                                    "temporal_ensemble_ramp_weights",
+                                    False,
+                                ),
                                 previous_action_pred=previous_action_pred,
                                 action_seq=model_action_seq,
                             )
@@ -2231,14 +2243,17 @@ def _temporal_ensemble_action_sequence(
     *,
     n_action_steps: int,
     coeff: float,
+    ramp_weights: bool,
     previous_action_pred: np.ndarray | None,
     action_seq: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
     """Blend time-aligned Cartesian deltas from consecutive full predictions.
 
-    ``coeff`` is the new-chunk weight.  Zero is an explicit disabled sentinel
-    and preserves the old action-only path, including policies that do not
-    return ``action_pred``.  Gripper channels are never blended.
+    ``coeff`` is the initial new-chunk weight.  Zero is an explicit disabled
+    sentinel and preserves the old action-only path, including policies that
+    do not return ``action_pred``.  With ``ramp_weights=True``, the new-chunk
+    weight increases linearly to one across the aligned overlap.  False keeps
+    the original fixed-weight ensemble.  Gripper channels are never blended.
     """
 
     if action_seq is None:
@@ -2283,6 +2298,7 @@ def _temporal_ensemble_action_sequence(
 
     available_overlap = max(0, min(action_steps, len(action_pred) - action_end))
     applied_overlap = 0
+    new_chunk_weights = np.empty((0,), dtype=np.float64)
     blended = np.array(action_seq, copy=True)
     if previous_action_pred is not None:
         previous = np.asarray(previous_action_pred)
@@ -2291,20 +2307,40 @@ def _temporal_ensemble_action_sequence(
                 "consecutive action_pred shapes differ: "
                 f"previous={previous.shape}, current={action_pred.shape}"
             )
-        applied_overlap = available_overlap
-        if applied_overlap > 0:
-            old_tail = previous[action_end : action_end + applied_overlap]
-            blended[:applied_overlap, :TEMPORAL_ENSEMBLE_POSE_DIM] = (
-                (1.0 - coeff) * old_tail[:, :TEMPORAL_ENSEMBLE_POSE_DIM]
-                + coeff
-                * blended[:applied_overlap, :TEMPORAL_ENSEMBLE_POSE_DIM]
+        if available_overlap > 0:
+            if ramp_weights and available_overlap > 1:
+                new_chunk_weights = np.linspace(
+                    coeff,
+                    1.0,
+                    num=available_overlap,
+                    dtype=np.float64,
+                )
+            else:
+                new_chunk_weights = np.full(
+                    available_overlap,
+                    coeff,
+                    dtype=np.float64,
+                )
+            old_chunk_weights = 1.0 - new_chunk_weights
+            applied_overlap = int(np.count_nonzero(old_chunk_weights > 0.0))
+            old_tail = previous[action_end : action_end + available_overlap]
+            blended[:available_overlap, :TEMPORAL_ENSEMBLE_POSE_DIM] = (
+                old_chunk_weights[:, None]
+                * old_tail[:, :TEMPORAL_ENSEMBLE_POSE_DIM]
+                + new_chunk_weights[:, None]
+                * blended[:available_overlap, :TEMPORAL_ENSEMBLE_POSE_DIM]
             )
 
+    old_chunk_weights = 1.0 - new_chunk_weights
     metadata = {
         "enabled": True,
         "coeff": coeff,
+        "ramp_weights": bool(ramp_weights),
+        "weight_mode": "linear_ramp" if ramp_weights else "fixed",
         "new_chunk_weight": coeff,
         "old_chunk_weight": 1.0 - coeff,
+        "new_chunk_weights": new_chunk_weights.tolist(),
+        "old_chunk_weights": old_chunk_weights.tolist(),
         "pose_dimensions_blended": TEMPORAL_ENSEMBLE_POSE_DIM,
         "grippers_blended": False,
         "action_start_index": action_start,
@@ -3011,6 +3047,14 @@ def _config_check_summary(
         summary["temporal_ensemble"] = {
             "enabled": bool(getattr(args, "temporal_ensemble_coeff", 0.0) > 0.0),
             "coeff": float(getattr(args, "temporal_ensemble_coeff", 0.0)),
+            "ramp_weights": bool(
+                getattr(args, "temporal_ensemble_ramp_weights", False)
+            ),
+            "weight_mode": (
+                "linear_ramp"
+                if getattr(args, "temporal_ensemble_ramp_weights", False)
+                else "fixed"
+            ),
             "new_chunk_weight": float(
                 getattr(args, "temporal_ensemble_coeff", 0.0)
             ),

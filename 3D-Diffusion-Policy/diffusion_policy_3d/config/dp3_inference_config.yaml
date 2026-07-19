@@ -106,7 +106,7 @@ robot:
   switch_tool_on_connect: true
   initialize_gripper_on_connect: true
   switch_cartesian_mode_on_connect: true
-  use_cartesian_servo_thread: true
+  use_cartesian_servo_thread: false
   camera_name: head_rgb
   camera_fps: 30
 
@@ -123,12 +123,15 @@ inference:
   rate_hz: 30
   action_mode: chunk # receding | chunk
   # Deployment-aligned temporal ensemble for synchronous chunks. 0.0 disables
-  # it and preserves the original queue behavior. For (0, 1], this is the new
-  # chunk weight; the aligned old prediction weight is (1 - coeff). Only the
-  # first 12 Cartesian pose channels are blended, while both grippers always
-  # use the new chunk. The overlap is derived dynamically from horizon,
-  # n_obs_steps, and n_action_steps. Offline tests recommend 0.5.
+  # it and strictly preserves the original queue behavior. For (0, 1], this is
+  # the initial new-chunk weight. Only the first 12 Cartesian pose channels are
+  # blended, while both grippers always use the new chunk. The overlap is
+  # derived dynamically from horizon, n_obs_steps, and n_action_steps.
   temporal_ensemble_coeff: 0.5
+  # true: linearly increase the new-chunk weight from coeff to 1.0 across the
+  # overlap, avoiding a jump back to the unblended final action. false: restore
+  # the previous fixed-weight behavior at every overlapping step.
+  temporal_ensemble_ramp_weights: true
   # Training remains DDPM/epsilon. Deployment uses DDIM built from the stored
   # DDPM beta schedule so 10 denoising steps retain quality at about 40 ms.
   scheduler: ddim # checkpoint | ddim

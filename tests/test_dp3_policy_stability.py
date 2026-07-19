@@ -206,10 +206,17 @@ def test_temporal_ensemble_blends_only_aligned_overlap() -> None:
     baseline = summary["C"]["baseline_new_prediction"]
     candidate = summary["C"]["candidates"]["new_weight_0.5"]
     pose_only = summary["C"]["candidates"]["pose_only_new_weight_0.5"]
+    ramp = summary["C"]["candidates"]["pose_only_ramp_new_weight_0.5"]
     assert baseline["boundary_jump"]["right_xyz"]["p95"] == pytest.approx(2.0)
     assert candidate["boundary_jump"]["right_xyz"]["p95"] == pytest.approx(1.0)
     assert pose_only["boundary_jump"]["right_xyz"]["p95"] == pytest.approx(1.0)
     assert pose_only["boundary_jump"]["right_gripper"]["p95"] == pytest.approx(
+        baseline["boundary_jump"]["right_gripper"]["p95"]
+    )
+    assert ramp["new_prediction_weights"] == pytest.approx([0.5, 0.75, 1.0])
+    assert ramp["old_prediction_weights"] == pytest.approx([0.5, 0.25, 0.0])
+    assert ramp["boundary_jump"]["right_xyz"]["p95"] == pytest.approx(1.0)
+    assert ramp["boundary_jump"]["right_gripper"]["p95"] == pytest.approx(
         baseline["boundary_jump"]["right_gripper"]["p95"]
     )
 

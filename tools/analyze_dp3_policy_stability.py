@@ -1006,8 +1006,9 @@ def summarize_temporal_ensemble(
 
     The old prediction's unused horizon tail and the next prediction's
     executable head refer to the same future frames.  Candidate ensembles blend
-    those aligned deltas; the non-overlapping final action remains the new
-    prediction.  Ground-truth errors use the Zarr actions for the new chunk.
+    those aligned deltas with either fixed or deployment-style linearly ramped
+    weights; the non-overlapping final action remains the new prediction.
+    Ground-truth errors use the Zarr actions for the new chunk.
     """
 
     contract = _chunk_overlap_contract(
@@ -1066,6 +1067,12 @@ def summarize_temporal_ensemble(
 
         candidates: dict[str, Any] = {}
         for new_weight in weights:
+            if overlap > 1:
+                ramp_weights = np.linspace(new_weight, 1.0, overlap)
+            elif overlap == 1:
+                ramp_weights = np.asarray([new_weight])
+            else:
+                ramp_weights = np.empty((0,), dtype=np.float64)
             blended = new_chunks.copy()
             if overlap > 0:
                 old_tail = old_predictions[:, old_tail_start : old_tail_start + overlap, :]
@@ -1090,6 +1097,21 @@ def summarize_temporal_ensemble(
                 "old_prediction_weight": 1.0 - new_weight,
                 "blend_scope": "cartesian_pose_only_grippers_use_new_prediction",
                 **summarize_candidate(pose_only),
+            }
+            ramp_pose_only = new_chunks.copy()
+            if overlap > 0:
+                ramp_pose_only[:, :overlap, :12] = (
+                    (1.0 - ramp_weights[None, :, None]) * old_tail[:, :, :12]
+                    + ramp_weights[None, :, None]
+                    * ramp_pose_only[:, :overlap, :12]
+                )
+            candidates[f"pose_only_ramp_new_weight_{new_weight:g}"] = {
+                "initial_new_prediction_weight": new_weight,
+                "new_prediction_weights": ramp_weights.tolist(),
+                "old_prediction_weights": (1.0 - ramp_weights).tolist(),
+                "weight_mode": "linear_ramp",
+                "blend_scope": "cartesian_pose_only_grippers_use_new_prediction",
+                **summarize_candidate(ramp_pose_only),
             }
 
         output[group] = {

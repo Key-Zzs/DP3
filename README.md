@@ -538,11 +538,14 @@ set. Other inference-specific fields may differ as documented below.
 
 For synchronous `action_mode: chunk`, `inference.temporal_ensemble_coeff`
 controls deployment-aligned overlap blending. `0.0` preserves the original
-queue exactly. Values in `(0, 1]` are the new-chunk weight; only the 12
+queue exactly. Values in `(0, 1]` are the initial new-chunk weight; only the 12
 Cartesian pose channels are blended and both grippers always use the new
 chunk. The overlap is derived from `horizon`, `n_obs_steps`, and the configured
-`n_action_steps`, so it is not tied to a four-action chunk. The checked-in
-configuration uses the offline-tested `0.5` setting.
+`n_action_steps`, so it is not tied to a four-action chunk. With
+`inference.temporal_ensemble_ramp_weights: true`, the new-chunk weight rises
+linearly from the configured coefficient to `1.0` across the overlap. Setting
+the ramp switch to `false` restores the previous fixed coefficient at every
+overlapping step.
 
 The live runtime is standalone in this repository. It uses the local Flexiv
 adapter and RealSense RGB-D implementation under

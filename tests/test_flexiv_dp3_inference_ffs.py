@@ -870,6 +870,7 @@ def test_temporal_ensemble_zero_preserves_action_only_policy_output() -> None:
         contract,
         n_action_steps=4,
         coeff=0.0,
+        ramp_weights=True,
         previous_action_pred=np.ones((8, 14), dtype=np.float32),
     )
 
@@ -917,6 +918,7 @@ def test_temporal_ensemble_aligns_any_valid_action_chunk(
         contract,
         n_action_steps=n_action_steps,
         coeff=0.5,
+        ramp_weights=False,
         previous_action_pred=previous,
     )
 
@@ -938,6 +940,64 @@ def test_temporal_ensemble_aligns_any_valid_action_chunk(
     assert metadata["available_overlap_steps"] == overlap
     assert metadata["applied_overlap_steps"] == overlap
     assert metadata["grippers_blended"] is False
+    assert metadata["weight_mode"] == "fixed"
+    assert metadata["new_chunk_weights"] == [0.5] * overlap
+
+
+@pytest.mark.parametrize(
+    ("horizon", "n_action_steps", "expected_weights"),
+    [
+        (8, 1, [0.5]),
+        (8, 4, [0.5, 0.75, 1.0]),
+        (15, 8, [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
+    ],
+)
+def test_temporal_ensemble_ramps_new_chunk_weight_across_overlap(
+    horizon: int,
+    n_action_steps: int,
+    expected_weights: list[float],
+) -> None:
+    n_obs_steps = 2
+    action_start = n_obs_steps - 1
+    current = np.zeros((horizon, 14), dtype=np.float32)
+    previous = np.zeros((horizon, 14), dtype=np.float32)
+    current[:, :12] = 10.0
+    previous[:, :12] = 100.0
+    current[:, 12:] = (0.25, 0.75)
+    previous[:, 12:] = (-10.0, -20.0)
+    action = current[action_start : action_start + n_action_steps].copy()
+    contract = SimpleNamespace(n_obs_steps=n_obs_steps, action_dim=14)
+
+    blended, saved_prediction, metadata = launcher._temporal_ensemble_action_sequence(
+        {
+            "action": launcher.torch.from_numpy(action[None]),
+            "action_pred": launcher.torch.from_numpy(current[None]),
+        },
+        contract,
+        n_action_steps=n_action_steps,
+        coeff=0.5,
+        ramp_weights=True,
+        previous_action_pred=previous,
+    )
+
+    overlap = len(expected_weights)
+    expected = action.copy()
+    weights = np.asarray(expected_weights, dtype=np.float64)
+    expected[:overlap, :12] = (
+        (1.0 - weights[:, None]) * 100.0 + weights[:, None] * 10.0
+    )
+    np.testing.assert_allclose(blended, expected)
+    np.testing.assert_array_equal(blended[:, 12:], action[:, 12:])
+    np.testing.assert_array_equal(saved_prediction, current)
+    assert metadata["weight_mode"] == "linear_ramp"
+    assert metadata["new_chunk_weights"] == pytest.approx(expected_weights)
+    assert metadata["old_chunk_weights"] == pytest.approx(
+        [1.0 - value for value in expected_weights]
+    )
+    assert metadata["available_overlap_steps"] == overlap
+    assert metadata["applied_overlap_steps"] == sum(
+        value < 1.0 for value in expected_weights
+    )
 
 
 def test_temporal_ensemble_first_chunk_is_unmodified_but_keeps_prediction() -> None:
@@ -953,6 +1013,7 @@ def test_temporal_ensemble_first_chunk_is_unmodified_but_keeps_prediction() -> N
         contract,
         n_action_steps=4,
         coeff=0.5,
+        ramp_weights=True,
         previous_action_pred=None,
     )
 

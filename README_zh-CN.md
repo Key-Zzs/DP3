@@ -487,9 +487,11 @@ checkpoint:
 
 同步 `action_mode: chunk` 下，`inference.temporal_ensemble_coeff` 控制按未来时刻对齐的
 chunk 重叠融合。设为 `0.0` 时完全保留原始队列逻辑；设为 `(0, 1]` 时表示新 chunk
-权重。融合只作用于双臂 12 维笛卡尔位姿，两个夹爪始终使用新 chunk。重叠长度根据
-`horizon`、`n_obs_steps` 和当前 `n_action_steps` 动态计算，并不限定四步 chunk。仓库
-默认使用离线测试推荐值 `0.5`。
+的初始权重。融合只作用于双臂 12 维笛卡尔位姿，两个夹爪始终使用新 chunk。重叠长度
+根据 `horizon`、`n_obs_steps` 和当前 `n_action_steps` 动态计算，并不限定四步 chunk。
+`inference.temporal_ensemble_ramp_weights: true` 会让新 chunk 权重在重叠区间内从
+配置值线性递增到 `1.0`；将该开关设为 `false` 可恢复原先每个重叠步都使用固定
+`temporal_ensemble_coeff` 的逻辑。
 
 实时推理运行时已经完整收回本仓库：Flexiv adapter 和 RealSense RGB-D 实现位于
 `third_party/real/dual_flexiv_rizon4s/interface`，不需要外部 Le-nero checkout，也不依赖
