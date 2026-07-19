@@ -90,6 +90,7 @@ LOGGER = logging.getLogger("flexiv_dp3_inference")
 FUTURE_WALL_TIME_TOLERANCE_S = 0.25
 MAX_MONITOR_RATE_HZ = 1000.0
 MAX_MONITOR_DISPLAY_POINTS = 1_000_000
+TEMPORAL_ENSEMBLE_POSE_DIM = 12
 
 CLI_DESCRIPTION = """Run Flexiv dual-arm DP3 inference.
 
@@ -103,6 +104,7 @@ and the Flexiv adapter without calling robot.connect().
 @dataclass(frozen=True)
 class _QueuedAction:
     vector: Any
+    model_vector: Any | None
     predicted_at: float
     chunk_index: int
     chunk_size: int
@@ -118,6 +120,7 @@ class _QueuedAction:
     point_cloud_padded: bool = False
     prediction_id: int = -1
     horizon: Any | None = None
+    temporal_ensemble: Mapping[str, Any] | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -189,6 +192,7 @@ def _args_from_inference_config(config_path: Path, *, check_config: bool) -> arg
         rate_hz=rate_hz,
         action_mode=str(inference["action_mode"]),
         n_action_steps=cfg["policy"]["n_action_steps"],
+        temporal_ensemble_coeff=float(inference.get("temporal_ensemble_coeff", 0.0)),
         use_ema=bool(cfg["use_ema"]),
         check_config=bool(check_config),
         camera_name=str(robot.get("camera_name", "head_rgb")),
@@ -501,7 +505,8 @@ def main() -> int:
         f"duration={duration_label} rate_hz={args.rate_hz:g} "
         f"action_mode={args.action_mode} scheduler={scheduler_class} "
         f"diffusion_steps={policy.num_inference_steps} "
-        f"n_action_steps={policy.n_action_steps}"
+        f"n_action_steps={policy.n_action_steps} "
+        f"temporal_ensemble_coeff={args.temporal_ensemble_coeff:g}"
     )
     robot = _make_flexiv_robot(args, builder, runtime_contract)
     limits = SafetyLimits(
@@ -600,6 +605,17 @@ def _validate_args(args: argparse.Namespace) -> None:
         args.n_action_steps,
         label="policy.n_action_steps",
     )
+    args.temporal_ensemble_coeff = _bounded_float(
+        getattr(args, "temporal_ensemble_coeff", 0.0),
+        label="inference.temporal_ensemble_coeff",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if args.temporal_ensemble_coeff > 0.0 and args.action_mode != "chunk":
+        raise SystemExit(
+            "inference.temporal_ensemble_coeff > 0 requires action_mode=chunk; "
+            "the configured ensemble aligns consecutive synchronous chunks"
+        )
     if args.gpu_id < 0:
         raise SystemExit("inference.gpu_id must be a non-negative integer")
     if args.device.startswith("cuda") and args.device != "cuda:0":
@@ -804,6 +820,7 @@ def _run_inference_loop(
     monitor = _start_monitor(args, builder, contract, runtime_contract)
     consecutive_timing_safety_skips = 0
     prediction_counter = 0
+    previous_action_pred: np.ndarray | None = None
 
     try:
         if stop_path is not None and stop_path.exists():
@@ -957,7 +974,28 @@ def _run_inference_loop(
                     policy_started = time.monotonic()
                     with torch.no_grad():
                         result = policy.predict_action(policy_obs)
-                    action_seq = _policy_action_sequence(result, contract)
+                    model_action_seq = _policy_action_sequence(result, contract)
+                    if args.action_mode == "chunk":
+                        action_seq, current_action_pred, temporal_ensemble = (
+                            _temporal_ensemble_action_sequence(
+                                result,
+                                contract,
+                                n_action_steps=getattr(args, "n_action_steps", 0),
+                                coeff=getattr(args, "temporal_ensemble_coeff", 0.0),
+                                previous_action_pred=previous_action_pred,
+                                action_seq=model_action_seq,
+                            )
+                        )
+                        previous_action_pred = current_action_pred
+                    else:
+                        action_seq = model_action_seq
+                        temporal_ensemble = {
+                            "enabled": False,
+                            "coeff": 0.0,
+                            "applied": False,
+                            "applied_overlap_steps": 0,
+                        }
+                        previous_action_pred = None
                     policy_predict_ms = (time.monotonic() - policy_started) * 1000.0
                     predicted_at = time.monotonic()
                     prediction_counter += 1
@@ -965,6 +1003,7 @@ def _run_inference_loop(
                         action_queue.extend(
                             _QueuedAction(
                                 vector=action,
+                                model_vector=model_action_seq[idx],
                                 predicted_at=predicted_at,
                                 chunk_index=idx,
                                 chunk_size=len(action_seq),
@@ -1007,6 +1046,7 @@ def _run_inference_loop(
                                 point_cloud_padded=bool(pc_meta.get("padded")),
                                 prediction_id=prediction_counter,
                                 horizon=action_seq,
+                                temporal_ensemble=temporal_ensemble,
                             )
                             for idx, action in enumerate(action_seq)
                         )
@@ -1015,6 +1055,7 @@ def _run_inference_loop(
                         action_queue.append(
                             _QueuedAction(
                                 vector=action_seq[0],
+                                model_vector=model_action_seq[0],
                                 predicted_at=predicted_at,
                                 chunk_index=0,
                                 chunk_size=len(action_seq),
@@ -1057,6 +1098,7 @@ def _run_inference_loop(
                                 point_cloud_padded=bool(pc_meta.get("padded")),
                                 prediction_id=prediction_counter,
                                 horizon=action_seq,
+                                temporal_ensemble=temporal_ensemble,
                             )
                         )
                     predicted_chunk = True
@@ -1113,7 +1155,12 @@ def _run_inference_loop(
                 "chunk_size": queued_action.chunk_size,
                 "queued_actions_remaining": len(action_queue),
                 "policy_output": _policy_output_summary(queued_action, raw_action),
-                "action_vector": _action_vector_summary(raw_action, safe_action),
+                "temporal_ensemble": dict(queued_action.temporal_ensemble or {}),
+                "action_vector": _action_vector_summary(
+                    queued_action.model_vector,
+                    raw_action,
+                    safe_action,
+                ),
                 "flexiv_action": action_dict,
                 "raw": summarize_action(raw_action),
                 "safe": summarize_action(safe_action),
@@ -1174,6 +1221,7 @@ def _run_inference_loop(
                 summary["send_status"] = "skipped_timing_safety"
                 summary["send_error"] = str(exc)
                 action_queue.clear()
+                previous_action_pred = None
                 consecutive_timing_safety_skips += 1
                 summary["consecutive_timing_safety_skips"] = (
                     consecutive_timing_safety_skips
@@ -1228,6 +1276,10 @@ def _run_inference_loop(
                             "queued_actions_remaining": int(len(action_queue)),
                             "action_age_ms": float(action_age_ms),
                             "model_raw_action14": np.asarray(
+                                queued_action.model_vector,
+                                dtype=float,
+                            ).tolist(),
+                            "temporal_ensemble_action14": np.asarray(
                                 raw_action,
                                 dtype=float,
                             ).tolist(),
@@ -2008,10 +2060,16 @@ def _policy_output_summary(queued_action: _QueuedAction, action: Any) -> dict[st
     }
 
 
-def _action_vector_summary(raw_action: Any, safe_action: Any) -> dict[str, Any]:
+def _action_vector_summary(
+    model_action: Any,
+    ensemble_action: Any,
+    safe_action: Any,
+) -> dict[str, Any]:
     return {
         "fields": list(ACTION_FIELD_NAMES),
-        "raw": _action_values(raw_action),
+        "model_raw": _action_values(model_action),
+        "raw": _action_values(ensemble_action),
+        "temporal_ensemble": _action_values(ensemble_action),
         "safe": _action_values(safe_action),
     }
 
@@ -2135,6 +2193,128 @@ def _policy_action_sequence(result: dict[str, Any], contract: Any):
             f"policy action dim {action_seq.shape[1]} != expected {int(contract.action_dim)}"
         )
     return action_seq
+
+
+def _policy_action_prediction(result: dict[str, Any], contract: Any) -> np.ndarray:
+    if "action_pred" not in result:
+        raise RuntimeError(
+            "temporal ensemble requires policy.predict_action() result['action_pred']"
+        )
+    prediction = result["action_pred"]
+    if not hasattr(prediction, "detach"):
+        prediction = torch.as_tensor(prediction)
+    prediction_np = prediction.detach().cpu().numpy()
+    if prediction_np.ndim != 3:
+        raise RuntimeError(
+            "policy action_pred must have shape (B,H,D); "
+            f"got {prediction_np.shape}"
+        )
+    if prediction_np.shape[0] != 1:
+        raise RuntimeError(
+            "policy action_pred batch must be 1 for live inference; "
+            f"got {prediction_np.shape[0]}"
+        )
+    action_pred = np.asarray(prediction_np[0])
+    if action_pred.shape[0] <= 0:
+        raise RuntimeError("policy action_pred horizon is empty")
+    if action_pred.shape[1] != int(contract.action_dim):
+        raise RuntimeError(
+            f"policy action_pred dim {action_pred.shape[1]} != expected "
+            f"{int(contract.action_dim)}"
+        )
+    return action_pred
+
+
+def _temporal_ensemble_action_sequence(
+    result: dict[str, Any],
+    contract: Any,
+    *,
+    n_action_steps: int,
+    coeff: float,
+    previous_action_pred: np.ndarray | None,
+    action_seq: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
+    """Blend time-aligned Cartesian deltas from consecutive full predictions.
+
+    ``coeff`` is the new-chunk weight.  Zero is an explicit disabled sentinel
+    and preserves the old action-only path, including policies that do not
+    return ``action_pred``.  Gripper channels are never blended.
+    """
+
+    if action_seq is None:
+        action_seq = _policy_action_sequence(result, contract)
+    else:
+        action_seq = np.asarray(action_seq)
+    coeff = float(coeff)
+    if not math.isfinite(coeff) or not 0.0 <= coeff <= 1.0:
+        raise ValueError(f"temporal ensemble coeff must be within [0, 1], got {coeff!r}")
+    if coeff == 0.0:
+        return action_seq, None, {
+            "enabled": False,
+            "coeff": 0.0,
+            "applied": False,
+            "applied_overlap_steps": 0,
+        }
+
+    action_steps = int(n_action_steps)
+    if action_steps <= 0:
+        raise ValueError("n_action_steps must be positive")
+    if len(action_seq) != action_steps:
+        raise RuntimeError(
+            f"policy returned {len(action_seq)} executable actions, expected "
+            f"n_action_steps={action_steps}"
+        )
+    if int(contract.action_dim) < TEMPORAL_ENSEMBLE_POSE_DIM:
+        raise RuntimeError(
+            f"temporal ensemble requires at least {TEMPORAL_ENSEMBLE_POSE_DIM} "
+            f"Cartesian action dimensions, got {int(contract.action_dim)}"
+        )
+
+    action_pred = _policy_action_prediction(result, contract)
+    action_start = int(contract.n_obs_steps) - 1
+    if action_start < 0:
+        raise RuntimeError(f"n_obs_steps must be positive, got {contract.n_obs_steps}")
+    action_end = action_start + action_steps
+    if action_end > len(action_pred):
+        raise RuntimeError(
+            f"executable action slice [{action_start}, {action_end}) exceeds "
+            f"action_pred horizon {len(action_pred)}"
+        )
+
+    available_overlap = max(0, min(action_steps, len(action_pred) - action_end))
+    applied_overlap = 0
+    blended = np.array(action_seq, copy=True)
+    if previous_action_pred is not None:
+        previous = np.asarray(previous_action_pred)
+        if previous.shape != action_pred.shape:
+            raise RuntimeError(
+                "consecutive action_pred shapes differ: "
+                f"previous={previous.shape}, current={action_pred.shape}"
+            )
+        applied_overlap = available_overlap
+        if applied_overlap > 0:
+            old_tail = previous[action_end : action_end + applied_overlap]
+            blended[:applied_overlap, :TEMPORAL_ENSEMBLE_POSE_DIM] = (
+                (1.0 - coeff) * old_tail[:, :TEMPORAL_ENSEMBLE_POSE_DIM]
+                + coeff
+                * blended[:applied_overlap, :TEMPORAL_ENSEMBLE_POSE_DIM]
+            )
+
+    metadata = {
+        "enabled": True,
+        "coeff": coeff,
+        "new_chunk_weight": coeff,
+        "old_chunk_weight": 1.0 - coeff,
+        "pose_dimensions_blended": TEMPORAL_ENSEMBLE_POSE_DIM,
+        "grippers_blended": False,
+        "action_start_index": action_start,
+        "chunk_stride_steps": action_steps,
+        "available_overlap_steps": available_overlap,
+        "applied_overlap_steps": applied_overlap,
+        "previous_prediction_available": previous_action_pred is not None,
+        "applied": bool(applied_overlap > 0 and coeff < 1.0),
+    }
+    return blended, np.array(action_pred, copy=True), metadata
 
 
 def _enforce_timing_safety(
@@ -2828,6 +3008,15 @@ def _config_check_summary(
         summary["duration_seconds"] = args.duration_seconds
         summary["action_mode"] = args.action_mode
         summary["n_action_steps"] = int(args.n_action_steps)
+        summary["temporal_ensemble"] = {
+            "enabled": bool(getattr(args, "temporal_ensemble_coeff", 0.0) > 0.0),
+            "coeff": float(getattr(args, "temporal_ensemble_coeff", 0.0)),
+            "new_chunk_weight": float(
+                getattr(args, "temporal_ensemble_coeff", 0.0)
+            ),
+            "pose_dimensions_blended": TEMPORAL_ENSEMBLE_POSE_DIM,
+            "grippers_blended": False,
+        }
         summary["use_ema"] = bool(args.use_ema)
         summary["inference_scheduler"] = args.inference_scheduler
         summary["scheduler_clip_sample"] = bool(args.scheduler_clip_sample)

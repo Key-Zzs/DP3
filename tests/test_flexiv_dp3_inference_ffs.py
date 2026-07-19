@@ -861,6 +861,125 @@ def test_fake_inference_monitor_preserves_horizon_chunk_and_action_semantics(
         assert item["commanded_valid"] is True
 
 
+def test_temporal_ensemble_zero_preserves_action_only_policy_output() -> None:
+    action = np.arange(4 * 14, dtype=np.float32).reshape(1, 4, 14)
+    contract = SimpleNamespace(n_obs_steps=2, action_dim=14)
+
+    sequence, current_prediction, metadata = launcher._temporal_ensemble_action_sequence(
+        {"action": launcher.torch.from_numpy(action)},
+        contract,
+        n_action_steps=4,
+        coeff=0.0,
+        previous_action_pred=np.ones((8, 14), dtype=np.float32),
+    )
+
+    np.testing.assert_array_equal(sequence, action[0])
+    assert current_prediction is None
+    assert metadata == {
+        "enabled": False,
+        "coeff": 0.0,
+        "applied": False,
+        "applied_overlap_steps": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("horizon", "n_obs_steps", "n_action_steps"),
+    [
+        (8, 2, 1),
+        (8, 2, 4),
+        (8, 2, 7),
+        (16, 2, 8),
+        (16, 2, 15),
+    ],
+)
+def test_temporal_ensemble_aligns_any_valid_action_chunk(
+    horizon: int,
+    n_obs_steps: int,
+    n_action_steps: int,
+) -> None:
+    action_start = n_obs_steps - 1
+    current = np.zeros((horizon, 14), dtype=np.float32)
+    previous = np.zeros((horizon, 14), dtype=np.float32)
+    for step in range(horizon):
+        current[step, :12] = 10.0 + step
+        previous[step, :12] = 100.0 + step
+        current[step, 12:] = (0.25 + step, 0.75 + step)
+        previous[step, 12:] = (-10.0 - step, -20.0 - step)
+    action = current[action_start : action_start + n_action_steps].copy()
+    contract = SimpleNamespace(n_obs_steps=n_obs_steps, action_dim=14)
+
+    blended, saved_prediction, metadata = launcher._temporal_ensemble_action_sequence(
+        {
+            "action": launcher.torch.from_numpy(action[None]),
+            "action_pred": launcher.torch.from_numpy(current[None]),
+        },
+        contract,
+        n_action_steps=n_action_steps,
+        coeff=0.5,
+        previous_action_pred=previous,
+    )
+
+    overlap = min(
+        n_action_steps,
+        max(0, horizon - (action_start + n_action_steps)),
+    )
+    expected = action.copy()
+    expected[:overlap, :12] = 0.5 * (
+        previous[
+            action_start + n_action_steps : action_start + n_action_steps + overlap,
+            :12,
+        ]
+        + action[:overlap, :12]
+    )
+    np.testing.assert_array_equal(blended, expected)
+    np.testing.assert_array_equal(blended[:, 12:], action[:, 12:])
+    np.testing.assert_array_equal(saved_prediction, current)
+    assert metadata["available_overlap_steps"] == overlap
+    assert metadata["applied_overlap_steps"] == overlap
+    assert metadata["grippers_blended"] is False
+
+
+def test_temporal_ensemble_first_chunk_is_unmodified_but_keeps_prediction() -> None:
+    prediction = np.arange(8 * 14, dtype=np.float32).reshape(8, 14)
+    action = prediction[1:5].copy()
+    contract = SimpleNamespace(n_obs_steps=2, action_dim=14)
+
+    sequence, saved_prediction, metadata = launcher._temporal_ensemble_action_sequence(
+        {
+            "action": launcher.torch.from_numpy(action[None]),
+            "action_pred": launcher.torch.from_numpy(prediction[None]),
+        },
+        contract,
+        n_action_steps=4,
+        coeff=0.5,
+        previous_action_pred=None,
+    )
+
+    np.testing.assert_array_equal(sequence, action)
+    np.testing.assert_array_equal(saved_prediction, prediction)
+    assert metadata["previous_prediction_available"] is False
+    assert metadata["applied_overlap_steps"] == 0
+    assert metadata["applied"] is False
+
+
+def test_action_summary_keeps_model_and_ensemble_outputs_distinct() -> None:
+    model_action = np.arange(14, dtype=np.float32)
+    ensemble_action = model_action + 10.0
+    safe_action = ensemble_action * 0.5
+
+    summary = launcher._action_vector_summary(
+        model_action,
+        ensemble_action,
+        safe_action,
+    )
+
+    np.testing.assert_array_equal(summary["model_raw"], model_action)
+    np.testing.assert_array_equal(summary["temporal_ensemble"], ensemble_action)
+    np.testing.assert_array_equal(summary["raw"], ensemble_action)
+    np.testing.assert_array_equal(summary["safe"], safe_action)
+
+
 def test_fake_inference_stage_capture_calls_builder_once_per_cycle(
     monkeypatch, tmp_path: Path
 ) -> None:

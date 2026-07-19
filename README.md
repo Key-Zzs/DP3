@@ -536,6 +536,14 @@ payload before connecting. Inference `n_action_steps` may differ within the
 official DP3 slice bound, and `use_ema` selects an available checkpoint weight
 set. Other inference-specific fields may differ as documented below.
 
+For synchronous `action_mode: chunk`, `inference.temporal_ensemble_coeff`
+controls deployment-aligned overlap blending. `0.0` preserves the original
+queue exactly. Values in `(0, 1]` are the new-chunk weight; only the 12
+Cartesian pose channels are blended and both grippers always use the new
+chunk. The overlap is derived from `horizon`, `n_obs_steps`, and the configured
+`n_action_steps`, so it is not tied to a four-action chunk. The checked-in
+configuration uses the offline-tested `0.5` setting.
+
 The live runtime is standalone in this repository. It uses the local Flexiv
 adapter and RealSense RGB-D implementation under
 `third_party/real/dual_flexiv_rizon4s/interface`; it does not require an

@@ -485,6 +485,12 @@ checkpoint:
 内保存的训练配置逐项比较。`n_action_steps` 可在官方 DP3 切片范围内独立设置；
 `use_ema` 用于选择 checkpoint 中实际存在的 EMA 或原始权重。
 
+同步 `action_mode: chunk` 下，`inference.temporal_ensemble_coeff` 控制按未来时刻对齐的
+chunk 重叠融合。设为 `0.0` 时完全保留原始队列逻辑；设为 `(0, 1]` 时表示新 chunk
+权重。融合只作用于双臂 12 维笛卡尔位姿，两个夹爪始终使用新 chunk。重叠长度根据
+`horizon`、`n_obs_steps` 和当前 `n_action_steps` 动态计算，并不限定四步 chunk。仓库
+默认使用离线测试推荐值 `0.5`。
+
 实时推理运行时已经完整收回本仓库：Flexiv adapter 和 RealSense RGB-D 实现位于
 `third_party/real/dual_flexiv_rizon4s/interface`，不需要外部 Le-nero checkout，也不依赖
 LeRobot Python 包。这与前文保留的离线 LeRobot 数据集格式兼容是两个独立边界。

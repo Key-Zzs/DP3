@@ -106,7 +106,7 @@ robot:
   switch_tool_on_connect: true
   initialize_gripper_on_connect: true
   switch_cartesian_mode_on_connect: true
-  use_cartesian_servo_thread: false
+  use_cartesian_servo_thread: true
   camera_name: head_rgb
   camera_fps: 30
 
@@ -120,8 +120,15 @@ inference:
   duration_seconds: null
   # Execute the configured SimpleDP3 action chunk at the 10 Hz deployment rate,
   # matching Le-nero's queue semantics and the official MultiStepWrapper.
-  rate_hz: 10
+  rate_hz: 30
   action_mode: chunk # receding | chunk
+  # Deployment-aligned temporal ensemble for synchronous chunks. 0.0 disables
+  # it and preserves the original queue behavior. For (0, 1], this is the new
+  # chunk weight; the aligned old prediction weight is (1 - coeff). Only the
+  # first 12 Cartesian pose channels are blended, while both grippers always
+  # use the new chunk. The overlap is derived dynamically from horizon,
+  # n_obs_steps, and n_action_steps. Offline tests recommend 0.5.
+  temporal_ensemble_coeff: 0.5
   # Training remains DDPM/epsilon. Deployment uses DDIM built from the stored
   # DDPM beta schedule so 10 denoising steps retain quality at about 40 ms.
   scheduler: ddim # checkpoint | ddim
@@ -159,7 +166,7 @@ inference:
 # background thread; control producers never block on a full queue. Actual TCP
 # feedback is sampled independently at 50 Hz to limit RDK lock contention.
 control_debug:
-  enabled: false
+  enabled: true
   feedback_hz: 50
   queue_size: 8192
   flush_interval_sec: 1.0
