@@ -52,5 +52,16 @@ outputs/
 logs/
 third_party/real/dual_flexiv_rizon4s/configs/flexiv_runtime.local.yaml
 
+# RMBench Stage 0 local assets, generated data, and runtime artifacts.
+third_party/sim/RMBench/assets/embodiments/
+third_party/sim/RMBench/assets/objects/
+third_party/sim/RMBench/data/
+third_party/sim/RMBench/envs/curobo/
+third_party/sim/RMBench/.cache/
+third_party/sim/RMBench/**/__pycache__/
+third_party/sim/RMBench/**/*.egg-info/
+third_party/sim/RMBench/**/*.mp4
+third_party/sim/RMBench/**/*.log
+
 # tar files
 *.tar.gz

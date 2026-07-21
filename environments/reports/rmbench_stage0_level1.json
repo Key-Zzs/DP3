@@ -1,0 +1,15 @@
+{
+  "level": 1,
+  "results": [
+    {
+      "name": "minimal SAPIEN 3 scene",
+      "status": "PASS",
+      "detail": "SAPIEN 3.0.0b1 scene created"
+    },
+    {
+      "name": "put_back_block import",
+      "status": "PASS",
+      "detail": "<class 'envs.put_back_block.put_back_block'>"
+    }
+  ]
+}

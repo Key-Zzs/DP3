@@ -1,0 +1,44 @@
+{
+  "results": [
+    {
+      "name": "diffusion_policy_3d",
+      "status": "PASS",
+      "detail": "None"
+    },
+    {
+      "name": "SimpleDP3",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d/policy/simple_dp3.py"
+    },
+    {
+      "name": "DP3",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d/policy/dp3.py"
+    },
+    {
+      "name": "Flexiv",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/real/dual_flexiv_rizon4s/interface"
+    },
+    {
+      "name": "MetaWorld",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d/dataset/metaworld_dataset.py"
+    },
+    {
+      "name": "Adroit",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d/dataset/adroit_dataset.py"
+    },
+    {
+      "name": "DexArt",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d/dataset/dexart_dataset.py"
+    },
+    {
+      "name": "SAPIEN 2 scene",
+      "status": "PASS",
+      "detail": "imported"
+    }
+  ]
+}

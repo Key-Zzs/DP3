@@ -1,0 +1,6 @@
+name: dp3-rmbench
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+prefix: /home/deepcybo/miniconda3/envs/dp3-rmbench

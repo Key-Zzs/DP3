@@ -1,0 +1,10 @@
+{
+  "level": 2,
+  "results": [
+    {
+      "name": "put_back_block initialization",
+      "status": "PASS",
+      "detail": "observation keys=['endpose', 'joint_action', 'observation', 'pointcloud', 'third_view_rgb']"
+    }
+  ]
+}

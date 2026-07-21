@@ -1,0 +1,299 @@
+# packages in environment at /home/deepcybo/miniconda3/envs/dp3:
+#
+# Name                           Version             Build            Channel
+_libgcc_mutex                    0.1                 main
+_openmp_mutex                    5.1                 52_gnu
+absl-py                          2.4.0               pypi_0           pypi
+accelerate                       1.13.0              pypi_0           pypi
+addict                           2.4.0               pypi_0           pypi
+aiohappyeyeballs                 2.7.1               pypi_0           pypi
+aiohttp                          3.14.1              pypi_0           pypi
+aiosignal                        1.4.0               pypi_0           pypi
+annotated-types                  0.7.0               pypi_0           pypi
+antlr4-python3-runtime           4.9.3               pypi_0           pypi
+anyio                            4.14.1              pypi_0           pypi
+asciitree                        0.3.3               pypi_0           pypi
+asttokens                        3.0.1               pypi_0           pypi
+async-timeout                    5.0.1               pypi_0           pypi
+attrs                            26.1.0              pypi_0           pypi
+av                               17.1.0              pypi_0           pypi
+binutils_impl_linux-64           2.44                h78f17ca_3
+binutils_linux-64                2.44                hc03a8fd_3
+blessed                          1.44.0              pypi_0           pypi
+blinker                          1.9.0               pypi_0           pypi
+bzip2                            1.0.8               h5eee18b_6
+ca-certificates                  2026.5.14           h06a4308_0
+certifi                          2026.6.17           pypi_0           pypi
+cffi                             2.0.0               pypi_0           pypi
+charset-normalizer               3.4.7               pypi_0           pypi
+choreographer                    1.3.0               pypi_0           pypi
+click                            8.4.2               pypi_0           pypi
+cloudpickle                      3.1.2               pypi_0           pypi
+comm                             0.2.3               pypi_0           pypi
+configargparse                   1.7.5               pypi_0           pypi
+contourpy                        1.3.2               pypi_0           pypi
+cryptography                     49.0.0              pypi_0           pypi
+cuda-bindings                    13.0.3              pypi_0           pypi
+cuda-cccl_linux-64               13.0.50             1                nvidia/label/cuda-13.0.0
+cuda-crt-dev_linux-64            13.0.48             0                nvidia/label/cuda-13.0.0
+cuda-crt-tools                   13.0.48             0                nvidia/label/cuda-13.0.0
+cuda-cudart                      13.0.48             h432ef4e_1       nvidia/label/cuda-13.0.0
+cuda-cudart-dev                  13.0.48             h3b4bcfc_1       nvidia/label/cuda-13.0.0
+cuda-cudart-dev_linux-64         13.0.48             hbe36340_1       nvidia/label/cuda-13.0.0
+cuda-cudart-static               13.0.48             h3b4bcfc_1       nvidia/label/cuda-13.0.0
+cuda-cudart-static_linux-64      13.0.48             hbe36340_1       nvidia/label/cuda-13.0.0
+cuda-cudart_linux-64             13.0.48             hc87184b_1       nvidia/label/cuda-13.0.0
+cuda-driver-dev_linux-64         13.0.48             hbe36340_1       nvidia/label/cuda-13.0.0
+cuda-nvcc                        13.0.48             h26104e3_0       nvidia/label/cuda-13.0.0
+cuda-nvcc-dev_linux-64           13.0.48             0                nvidia/label/cuda-13.0.0
+cuda-nvcc-impl                   13.0.48             hbe36340_0       nvidia/label/cuda-13.0.0
+cuda-nvcc-tools                  13.0.48             h3b4bcfc_0       nvidia/label/cuda-13.0.0
+cuda-nvcc_linux-64               13.0.48             h278ecba_0       nvidia/label/cuda-13.0.0
+cuda-nvvm-dev_linux-64           13.0.48             0                nvidia/label/cuda-13.0.0
+cuda-nvvm-impl                   13.0.48             h3b4bcfc_0       nvidia/label/cuda-13.0.0
+cuda-nvvm-tools                  13.0.48             h3b4bcfc_0       nvidia/label/cuda-13.0.0
+cuda-pathfinder                  1.2.2               pypi_0           pypi
+cuda-toolkit                     13.0.2              pypi_0           pypi
+cuda-version                     13.0                h8445db7_3
+cycler                           0.12.1              pypi_0           pypi
+cython                           0.29.35             pypi_0           pypi
+dash                             4.3.0               pypi_0           pypi
+datasets                         4.1.1               pypi_0           pypi
+decorator                        4.4.2               pypi_0           pypi
+deepdiff                         8.6.2               pypi_0           pypi
+dexart                           0.1.0               pypi_0           pypi
+diffusers                        0.11.1              pypi_0           pypi
+diffusion-policy-3d              0.0.0               pypi_0           pypi
+dill                             0.4.0               pypi_0           pypi
+dm-control                       1.0.43              pypi_0           pypi
+dm-env                           1.6                 pypi_0           pypi
+dm-tree                          0.1.10              pypi_0           pypi
+draccus                          0.10.0              pypi_0           pypi
+einops                           0.4.1               pypi_0           pypi
+etils                            1.13.0              pypi_0           pypi
+exceptiongroup                   1.3.1               pypi_0           pypi
+executing                        2.2.1               pypi_0           pypi
+fasteners                        0.20                pypi_0           pypi
+fastjsonschema                   2.21.2              pypi_0           pypi
+filelock                         3.29.0              pypi_0           pypi
+flask                            3.1.3               pypi_0           pypi
+flexivrdk                        1.9.0               pypi_0           pypi
+fonttools                        4.63.0              pypi_0           pypi
+frozenlist                       1.8.0               pypi_0           pypi
+fsspec                           2025.9.0            pypi_0           pypi
+fvcore                           0.1.5.post20221221  pypi_0           pypi
+gcc_impl_linux-64                14.3.0              h4943218_4
+gcc_linux-64                     14.3.0              hda73cce_14
+gitdb                            4.0.12              pypi_0           pypi
+gitpython                        3.1.50              pypi_0           pypi
+glfw                             2.10.0              pypi_0           pypi
+gpustat                          1.1.1               pypi_0           pypi
+gxx_impl_linux-64                14.3.0              he634eba_4
+gxx_linux-64                     14.3.0              hca8765c_14
+gym                              0.21.0              pypi_0           pypi
+h11                              0.16.0              pypi_0           pypi
+hf-xet                           1.5.1               pypi_0           pypi
+httpcore                         1.0.9               pypi_0           pypi
+httpx                            0.28.1              pypi_0           pypi
+httpx-sse                        0.4.3               pypi_0           pypi
+huggingface-hub                  0.25.2              pypi_0           pypi
+hydra-core                       1.2.0               pypi_0           pypi
+idna                             3.18                pypi_0           pypi
+imageio                          2.37.3              pypi_0           pypi
+imageio-ffmpeg                   0.6.0               pypi_0           pypi
+importlib-metadata               9.0.0               pypi_0           pypi
+importlib-resources              7.1.0               pypi_0           pypi
+iniconfig                        2.3.0               pypi_0           pypi
+iopath                           0.1.10              pypi_0           pypi
+ipdb                             0.13.13             pypi_0           pypi
+ipython                          8.39.0              pypi_0           pypi
+ipywidgets                       8.1.8               pypi_0           pypi
+itsdangerous                     2.2.0               pypi_0           pypi
+janus                            2.0.0               pypi_0           pypi
+jedi                             0.20.0              pypi_0           pypi
+jinja2                           3.1.6               pypi_0           pypi
+jinxed                           2.0.4               pypi_0           pypi
+joblib                           1.5.3               pypi_0           pypi
+jsonschema                       4.26.0              pypi_0           pypi
+jsonschema-specifications        2025.9.1            pypi_0           pypi
+jupyter-core                     5.9.1               pypi_0           pypi
+jupyterlab-widgets               3.0.16              pypi_0           pypi
+kaleido                          1.3.0               pypi_0           pypi
+kernel-headers_linux-64          4.18.0              h3108a97_1
+kiwisolver                       1.5.0               pypi_0           pypi
+labmaze                          1.0.6               pypi_0           pypi
+ld_impl_linux-64                 2.44                h9e0c5a2_3
+libexpat                         2.8.1               h7354ed3_1
+libffi                           3.4.8               h06d3fd0_3
+libgcc                           15.2.0              h69a1729_8
+libgcc-devel_linux-64            14.3.0              he7458c1_104
+libgcc-ng                        15.2.0              h166f726_8
+libgomp                          15.2.0              h4751f2c_8
+libnsl                           2.0.0               h5eee18b_0
+libnvptxcompiler-dev_linux-64    13.0.48             0                nvidia/label/cuda-13.0.0
+libsanitizer                     14.3.0              hd4faa28_4
+libstdcxx                        15.2.0              h39759b7_8
+libstdcxx-devel_linux-64         14.3.0              he7458c1_104
+libstdcxx-ng                     15.2.0              hc03a8fd_8
+libuuid                          1.41.5              h5eee18b_0
+libxcb                           1.17.0              h9b100fa_0
+libzlib                          1.3.2               h47b2149_0
+llvmlite                         0.44.0              pypi_0           pypi
+logistro                         2.0.1               pypi_0           pypi
+lxml                             6.1.1               pypi_0           pypi
+markupsafe                       3.0.3               pypi_0           pypi
+matplotlib                       3.10.9              pypi_0           pypi
+matplotlib-inline                0.2.2               pypi_0           pypi
+mcp                              1.28.0              pypi_0           pypi
+mergedeep                        1.3.4               pypi_0           pypi
+metaworld                        0.1.0               pypi_0           pypi
+mj-envs                          1.0.0               pypi_0           pypi
+mjrl                             1.0.0               pypi_0           pypi
+ml-dtypes                        0.5.4               pypi_0           pypi
+moviepy                          1.0.3               pypi_0           pypi
+mpmath                           1.3.0               pypi_0           pypi
+mujoco                           3.10.0              pypi_0           pypi
+mujoco-py                        2.1.2.14            pypi_0           pypi
+multidict                        6.7.1               pypi_0           pypi
+multiprocess                     0.70.16             pypi_0           pypi
+mypy-extensions                  1.1.0               pypi_0           pypi
+narwhals                         2.22.1              pypi_0           pypi
+nbformat                         5.10.4              pypi_0           pypi
+ncurses                          6.5                 h7934f7d_0
+nest-asyncio                     1.6.0               pypi_0           pypi
+networkx                         3.4.2               pypi_0           pypi
+ninja                            1.13.0              pypi_0           pypi
+numba                            0.61.2              pypi_0           pypi
+numcodecs                        0.13.1              pypi_0           pypi
+numpy                            2.2.6               pypi_0           pypi
+nvidia-cublas                    13.1.0.3            pypi_0           pypi
+nvidia-cuda-cupti                13.0.85             pypi_0           pypi
+nvidia-cuda-nvrtc                13.0.88             pypi_0           pypi
+nvidia-cuda-runtime              13.0.96             pypi_0           pypi
+nvidia-cudnn-cu13                9.19.0.56           pypi_0           pypi
+nvidia-cufft                     12.0.0.61           pypi_0           pypi
+nvidia-cufile                    1.15.1.6            pypi_0           pypi
+nvidia-curand                    10.4.0.35           pypi_0           pypi
+nvidia-cusolver                  12.0.4.66           pypi_0           pypi
+nvidia-cusparse                  12.6.3.3            pypi_0           pypi
+nvidia-cusparselt-cu13           0.8.0               pypi_0           pypi
+nvidia-ml-py                     13.610.43           pypi_0           pypi
+nvidia-nccl-cu13                 2.28.9              pypi_0           pypi
+nvidia-nvjitlink                 13.0.88             pypi_0           pypi
+nvidia-nvshmem-cu13              3.4.5               pypi_0           pypi
+nvidia-nvtx                      13.0.85             pypi_0           pypi
+omegaconf                        2.3.1               pypi_0           pypi
+onnx                             1.18.0              pypi_0           pypi
+onnx-ir                          0.2.1               pypi_0           pypi
+onnxscript                       0.5.6               pypi_0           pypi
+open3d                           0.19.0              pypi_0           pypi
+opencv-python-headless           4.12.0.88           pypi_0           pypi
+openssl                          3.5.7               h1b28b03_0
+orderly-set                      5.5.0               pypi_0           pypi
+orjson                           3.11.9              pypi_0           pypi
+packaging                        26.0                py310h06a4308_0
+pandas                           2.3.3               pypi_0           pypi
+parso                            0.8.7               pypi_0           pypi
+patchelf                         0.17.2.0            pypi_0           pypi
+pexpect                          4.9.0               pypi_0           pypi
+pillow                           12.2.0              pypi_0           pypi
+pip                              26.1.2              pyhc872135_0
+platformdirs                     4.10.0              pypi_0           pypi
+plotly                           6.8.0               pypi_0           pypi
+pluggy                           1.6.0               pypi_0           pypi
+pointcloud-builder               0.1.0               pypi_0           pypi
+portalocker                      3.2.0               pypi_0           pypi
+proglog                          0.1.12              pypi_0           pypi
+prompt-toolkit                   3.0.52              pypi_0           pypi
+propcache                        0.5.2               pypi_0           pypi
+protobuf                         7.35.1              pypi_0           pypi
+psutil                           7.2.2               pypi_0           pypi
+pthread-stubs                    0.3                 h0ce48e5_1
+ptyprocess                       0.7.0               pypi_0           pypi
+pure-eval                        0.2.3               pypi_0           pypi
+pyarrow                          24.0.0              pypi_0           pypi
+pybind11                         3.0.4               pypi_0           pypi
+pycparser                        3.0                 pypi_0           pypi
+pydantic                         2.13.4              pypi_0           pypi
+pydantic-core                    2.46.4              pypi_0           pypi
+pydantic-settings                2.14.2              pypi_0           pypi
+pygments                         2.20.0              pypi_0           pypi
+pyjwt                            2.13.0              pypi_0           pypi
+pyopengl                         3.1.10              pypi_0           pypi
+pyparsing                        3.3.2               pypi_0           pypi
+pyquaternion                     0.9.9               pypi_0           pypi
+pyrealsense2                     2.58.2.10647        pypi_0           pypi
+pyserial                         3.5                 pypi_0           pypi
+pytest                           9.1.1               pypi_0           pypi
+python                           3.10.20             h17756b0_1
+python-dateutil                  2.9.0.post0         pypi_0           pypi
+python-dotenv                    1.2.2               pypi_0           pypi
+python-multipart                 0.0.32              pypi_0           pypi
+pytorch3d                        0.7.6               pypi_0           pypi
+pytz                             2026.2              pypi_0           pypi
+pyyaml                           6.0.3               pypi_0           pypi
+pyyaml-include                   1.4.1               pypi_0           pypi
+readline                         8.3                 hc2a1206_0
+referencing                      0.37.0              pypi_0           pypi
+regex                            2026.5.9            pypi_0           pypi
+requests                         2.34.2              pypi_0           pypi
+rerun-sdk                        0.34.1              pypi_0           pypi
+retrying                         1.4.2               pypi_0           pypi
+rpds-py                          0.30.0              pypi_0           pypi
+safetensors                      0.7.0               pypi_0           pypi
+sapien                           2.2.1               pypi_0           pypi
+scikit-learn                     1.7.2               pypi_0           pypi
+scipy                            1.15.3              pypi_0           pypi
+sentry-sdk                       2.63.0              pypi_0           pypi
+setuptools                       59.5.0              pypi_0           pypi
+simplejson                       4.1.1               pypi_0           pypi
+six                              1.17.0              pypi_0           pypi
+smmap                            5.0.3               pypi_0           pypi
+spdlog                           2.0.6               pypi_0           pypi
+sqlite                           3.53.2              h795bf6d_0
+sse-starlette                    3.4.5               pypi_0           pypi
+stack-data                       0.6.3               pypi_0           pypi
+starlette                        1.3.1               pypi_0           pypi
+sympy                            1.14.0              pypi_0           pypi
+sysroot_linux-64                 2.28                h3108a97_1
+tabulate                         0.10.0              pypi_0           pypi
+tensorrt-cu13                    10.16.1.11          pypi_0           pypi
+tensorrt-cu13-bindings           10.16.1.11          pypi_0           pypi
+tensorrt-cu13-libs               10.16.1.11          pypi_0           pypi
+termcolor                        3.3.0               pypi_0           pypi
+threadpoolctl                    3.6.0               pypi_0           pypi
+timm                             1.0.28              pypi_0           pypi
+tk                               8.6.15              h54e0aa7_0
+toml                             0.10.2              pypi_0           pypi
+tomli                            2.4.1               pypi_0           pypi
+torch                            2.11.0+cu130        pypi_0           pypi
+torchaudio                       2.11.0+cu130        pypi_0           pypi
+torchvision                      0.26.0+cu130        pypi_0           pypi
+tqdm                             4.68.3              pypi_0           pypi
+traitlets                        5.15.1              pypi_0           pypi
+transforms3d                     0.4.2               pypi_0           pypi
+triton                           3.6.0               pypi_0           pypi
+typing-extensions                4.15.0              pypi_0           pypi
+typing-inspect                   0.9.0               pypi_0           pypi
+typing-inspection                0.4.2               pypi_0           pypi
+tzdata                           2026.2              pypi_0           pypi
+urllib3                          2.7.0               pypi_0           pypi
+uvicorn                          0.49.0              pypi_0           pypi
+visualizer                       0.1.0               pypi_0           pypi
+wandb                            0.28.0              pypi_0           pypi
+wcwidth                          0.8.1               pypi_0           pypi
+werkzeug                         3.1.8               pypi_0           pypi
+wheel                            0.47.0              py310h06a4308_0
+widgetsnbextension               4.0.15              pypi_0           pypi
+wrapt                            2.2.2               pypi_0           pypi
+xorg-libx11                      1.8.12              h9b100fa_1
+xorg-libxau                      1.0.12              h9b100fa_0
+xorg-libxdmcp                    1.1.5               h9b100fa_0
+xorg-xorgproto                   2024.1              h5eee18b_1
+xxhash                           3.8.1               pypi_0           pypi
+xz                               5.8.2               h448239c_0
+yacs                             0.1.8               pypi_0           pypi
+yarl                             1.24.2              pypi_0           pypi
+zarr                             2.12.0              pypi_0           pypi
+zipp                             4.1.0               pypi_0           pypi
+zlib                             1.3.2               h47b2149_0

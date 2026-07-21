@@ -1,0 +1,8 @@
+name: dp3-rmbench
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - cuda-nvcc=12.8.61
+  - cuda-cudart-dev=12.8.57
+prefix: /home/deepcybo/miniconda3/envs/dp3-rmbench

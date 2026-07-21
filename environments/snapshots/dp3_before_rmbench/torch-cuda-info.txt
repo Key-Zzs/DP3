@@ -1,0 +1,72 @@
+{
+  "torch": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/torch/__init__.py",
+    "version": "2.11.0+cu130"
+  },
+  "numpy": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/numpy/__init__.py",
+    "version": "2.2.6"
+  },
+  "scipy": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/scipy/__init__.py",
+    "version": "1.15.3"
+  },
+  "sapien": {
+    "status": "FAIL",
+    "error": "ImportError: numpy.core.multiarray failed to import"
+  },
+  "gym": {
+    "status": "FAIL",
+    "error": "ModuleNotFoundError: No module named 'gym'"
+  },
+  "gymnasium": {
+    "status": "FAIL",
+    "error": "ModuleNotFoundError: No module named 'gymnasium'"
+  },
+  "zarr": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/zarr/__init__.py",
+    "version": "2.12.0"
+  },
+  "diffusers": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/diffusers/__init__.py",
+    "version": "0.11.1"
+  },
+  "hydra": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/hydra/__init__.py",
+    "version": "1.2.0"
+  },
+  "omegaconf": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/omegaconf/__init__.py",
+    "version": "2.3.1"
+  },
+  "pytorch3d": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/pytorch3d/__init__.py",
+    "version": "0.7.6"
+  },
+  "mplib": {
+    "status": "FAIL",
+    "error": "ModuleNotFoundError: No module named 'mplib'"
+  },
+  "open3d": {
+    "status": "PASS",
+    "file": "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/open3d/__init__.py",
+    "version": "0.19.0"
+  },
+  "torch_cuda": {
+    "version": "2.11.0+cu130",
+    "cuda_runtime": "13.0",
+    "cuda_available": true,
+    "gpu_count": 1,
+    "gpus": [
+      "NVIDIA GeForce RTX 5080"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "sys.executable": "/home/deepcybo/miniconda3/envs/dp3/bin/python",
+  "sys.version": "3.10.20 (main, Jun 11 2026, 15:17:37) [GCC 14.3.0]",
+  "sys.path": [
+    "",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python310.zip",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/lib-dynload",
+    "/home/deepcybo/.local/lib/python3.10/site-packages",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/rerun_sdk"
+  ],
+  "site_packages": [
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages"
+  ],
+  "user_site": "/home/deepcybo/.local/lib/python3.10/site-packages",
+  "pth_files": [
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.diffusion_policy_3d-0.0.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.visualizer-0.1.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.mj_envs-1.0.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.gym-0.21.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.mjrl-1.0.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/rerun_sdk.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.metaworld-0.1.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.pointcloud_builder-0.1.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/distutils-precedence.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.mujoco_py-2.1.2.14.pth"
+  ],
+  "editable_installs": []
+}

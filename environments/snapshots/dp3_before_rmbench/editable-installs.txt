@@ -1,0 +1,15 @@
+{
+  "pth_files": [
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.diffusion_policy_3d-0.0.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.visualizer-0.1.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.mj_envs-1.0.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.gym-0.21.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.mjrl-1.0.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/rerun_sdk.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.metaworld-0.1.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.pointcloud_builder-0.1.0.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/distutils-precedence.pth",
+    "/home/deepcybo/miniconda3/envs/dp3/lib/python3.10/site-packages/__editable__.mujoco_py-2.1.2.14.pth"
+  ],
+  "egg_links": []
+}

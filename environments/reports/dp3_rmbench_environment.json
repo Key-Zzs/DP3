@@ -1,0 +1,112 @@
+{
+  "repository": "/home/deepcybo/workspace/3D-Diffusion-Policy",
+  "branch": "develop/RMBench",
+  "commit": "7b817a8667ae168466506bf95001551f51ebf851",
+  "python": {
+    "executable": "/home/deepcybo/miniconda3/envs/dp3-rmbench/bin/python",
+    "version": "3.10.20 (main, Jun 11 2026, 15:17:37) [GCC 14.3.0]",
+    "sys_path": [
+      "/home/deepcybo/workspace/3D-Diffusion-Policy/scripts/rmbench",
+      "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python310.zip",
+      "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10",
+      "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/lib-dynload",
+      "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages",
+      "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy",
+      "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/envs/curobo/src",
+      "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/setuptools/_vendor"
+    ]
+  },
+  "conda": {
+    "default_env": "dp3-rmbench",
+    "prefix": "/home/deepcybo/miniconda3/envs/dp3-rmbench"
+  },
+  "torch_cuda": {
+    "torch": "2.7.1+cu128",
+    "cuda_runtime": "12.8",
+    "cuda_available": true,
+    "gpu_count": 1,
+    "gpus": [
+      "NVIDIA GeForce RTX 5080"
+    ]
+  },
+  "packages": {
+    "torch": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/torch/__init__.py",
+      "version": "2.7.1+cu128"
+    },
+    "numpy": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/numpy/__init__.py",
+      "version": "1.26.4"
+    },
+    "scipy": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/scipy/__init__.py",
+      "version": "1.10.1"
+    },
+    "sapien": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/sapien/__init__.py",
+      "version": "3.0.0b1"
+    },
+    "gymnasium": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/gymnasium/__init__.py",
+      "version": "0.29.1"
+    },
+    "mplib": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/mplib/__init__.py",
+      "version": "0.2.1"
+    },
+    "pytorch3d.ops": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/pytorch3d/ops/__init__.py",
+      "version": null
+    },
+    "curobo.curobolib.geom": {
+      "status": "PASS",
+      "file": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/envs/curobo/src/curobo/curobolib/geom.py",
+      "version": null
+    },
+    "warp": {
+      "status": "PASS",
+      "file": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/warp/__init__.py",
+      "version": "1.6.2"
+    }
+  },
+  "dp3_import": {
+    "file": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d",
+    "spec_origin": "None",
+    "expected_root": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy",
+    "shadow_path": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/policy/DP3"
+  },
+  "assets": {
+    "aloha-agilex": {
+      "exists": true,
+      "path": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/assets/embodiments/aloha-agilex"
+    },
+    "franka-panda": {
+      "exists": true,
+      "path": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/assets/embodiments/franka-panda"
+    },
+    "005_button": {
+      "exists": true,
+      "path": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/assets/objects/005_button"
+    }
+  },
+  "asset_source": {
+    "repo": "TianxingChen/RMBench",
+    "revision": "d899d72b53270a89f71d216c08ecbd4d9a7004fd"
+  },
+  "subtree": {
+    "path": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench",
+    "license": true,
+    "vendor_metadata": true
+  },
+  "curobo": {
+    "path": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/envs/curobo",
+    "git_head": "d64c4b005459db10c5dd867d8b30a87d5bda9bdb"
+  }
+}

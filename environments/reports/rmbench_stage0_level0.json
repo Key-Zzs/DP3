@@ -1,0 +1,45 @@
+{
+  "level": 0,
+  "results": [
+    {
+      "name": "DP3",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d"
+    },
+    {
+      "name": "PyTorch",
+      "status": "PASS",
+      "detail": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/torch/__init__.py"
+    },
+    {
+      "name": "RMBench envs",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/envs/__init__.py"
+    },
+    {
+      "name": "SAPIEN 3",
+      "status": "PASS",
+      "detail": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/sapien/__init__.py"
+    },
+    {
+      "name": "Gymnasium",
+      "status": "PASS",
+      "detail": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/gymnasium/__init__.py"
+    },
+    {
+      "name": "MPLib",
+      "status": "PASS",
+      "detail": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/mplib/__init__.py"
+    },
+    {
+      "name": "PyTorch3D ops",
+      "status": "PASS",
+      "detail": "/home/deepcybo/miniconda3/envs/dp3-rmbench/lib/python3.10/site-packages/pytorch3d/ops/__init__.py"
+    },
+    {
+      "name": "CuRobo extensions",
+      "status": "PASS",
+      "detail": "/home/deepcybo/workspace/3D-Diffusion-Policy/third_party/sim/RMBench/envs/curobo/src/curobo/curobolib/geom.py"
+    }
+  ]
+}

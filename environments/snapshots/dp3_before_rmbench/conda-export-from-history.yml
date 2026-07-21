@@ -1,0 +1,9 @@
+name: dp3
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - cuda-cccl_linux-64
+  - cuda-cudart-dev
+  - cuda-nvcc
+prefix: /home/deepcybo/miniconda3/envs/dp3
