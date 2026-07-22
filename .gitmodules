@@ -1,3 +1,7 @@
 [submodule "PointCloudBuilder"]
 	path = PointCloudBuilder
 	url = https://github.com/Key-Zzs/PointCloudBuilder.git
+[submodule "third_party/sim/flexiv_description"]
+	path = third_party/sim/flexiv_description
+	url = https://github.com/flexivrobotics/flexiv_description.git
+	branch = humble-v1
