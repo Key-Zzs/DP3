@@ -1,18 +1,46 @@
 schema: rmbench_flexiv_installation_geometry_v1
 world_frame: world
 table_height_m: 0.74
-workspace_center_world: [0.0, 0.05, 0.90]
-base_separation_m: 0.90
+workspace_center_world: [0.0, 0.05, 0.74]
+table:
+  half_size_m: [0.70, 0.95, 0.04]
+  center_world: [0.0, 0.05, 0.70]
+  long_edge_axis: y
+  source: user_specified_simulation_geometry
+  verified: false
+  note: The dual-arm rack is outside the negative-x long edge.
+base_separation_m: 0.30
+raised_base_rack:
+  urdf: rack.urdf
+  center_world: [-0.88, 0.05, 0.0]
+  foot_center_world: [-0.88, 0.05, 0.04]
+  foot_size_m: [0.38, 0.72, 0.08]
+  center_upright_size_m: [0.10, 0.10, 0.86]
+  mounting_plane_height_m: 0.94
+  # Kept as the stage-2 height contract: the mounting-plane center is 20 cm
+  # above the table top (0.94 - 0.74), not a horizontal platform top.
+  platform_top_height_m: 0.94
+  mount_plate_size_m: [0.24, 0.24, 0.012]
+  mount_plate_roll_rad: [-0.7853981633974483, 0.7853981633974483]
+  mount_plate_center_world:
+    left: [-0.88, 0.204243, 0.935757]
+    right: [-0.88, -0.104243, 0.935757]
+  outward_brace_angle_rad: 0.7853981633974483
+  outside_long_edge: negative_x
+  height_above_table_m: 0.20
+  source: user_specified_simulation_geometry
+  verified: false
+  note: One fixed-root rack with a center upright, two outward 45-degree braces, and sloped plates that meet the two robot base planes.
 left_base_pose_world:
-  position: [-0.45, -0.15, 0.74]
-  rpy_rad: [0.0, 0.0, 0.0]
-  source: simulation_default
+  position: [-0.88, 0.20, 0.94]
+  rpy_rad: [-0.7853981633974483, 0.0, 0.0]
+  source: user_specified_simulation_geometry
   verified: false
-  note: No real dual-base translation was present in the checked-in/private runtime config.
+  note: Left base is 30 cm from the right base and rolled -45 degrees about world x.
 right_base_pose_world:
-  position: [0.45, -0.15, 0.74]
-  rpy_rad: [0.0, 0.0, 3.141592653589793]
-  source: simulation_default
+  position: [-0.88, -0.10, 0.94]
+  rpy_rad: [0.7853981633974483, 0.0, 0.0]
+  source: user_specified_simulation_geometry
   verified: false
-  note: No real dual-base translation was present in the checked-in/private runtime config.
+  note: Right base is 30 cm from the left base and rolled +45 degrees about world x.
 base_yaw_convention: positive z yaw in world frame

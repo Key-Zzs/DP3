@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import gymnasium as gym
@@ -40,20 +42,72 @@ def _pose_from_config(payload: dict[str, Any]) -> RigidPose:
 
 
 def _camera_matrix(position: Any, forward: Any, left: Any, up: Any) -> np.ndarray:
+    forward = np.asarray(forward, dtype=float)
+    forward /= np.linalg.norm(forward)
+    left = np.asarray(left, dtype=float)
+    left /= np.linalg.norm(left)
+    up = np.asarray(up, dtype=float)
+    up /= np.linalg.norm(up)
     matrix = np.eye(4, dtype=float)
-    matrix[:3, :3] = np.stack(
-        [np.asarray(forward, dtype=float), np.asarray(left, dtype=float), np.asarray(up, dtype=float)], axis=1
-    )
+    matrix[:3, :3] = np.stack([forward, left, up], axis=1)
     matrix[:3, 3] = np.asarray(position, dtype=float)
     return matrix
 
 
+def _look_at_matrix(position: Any, target: Any, up_hint: Any = (0.0, 0.0, 1.0)) -> np.ndarray:
+    """Build SAPIEN's camera pose from a world-space look-at target.
+
+    SAPIEN camera poses use columns (forward, left, up).  Computing the frame
+    from a target keeps the bounded front/side/top artifacts pointed at the
+    workspace instead of relying on approximate hand-written basis vectors.
+    """
+    position = np.asarray(position, dtype=float)
+    target = np.asarray(target, dtype=float)
+    forward = target - position
+    forward /= np.linalg.norm(forward)
+    up_hint = np.asarray(up_hint, dtype=float)
+    left = np.cross(up_hint, forward)
+    if np.linalg.norm(left) < 1e-8:
+        # A top view looks along -z, so the usual world-z up hint is
+        # parallel to the optical axis. Use world-y as a stable fallback.
+        left = np.cross(np.asarray([0.0, 1.0, 0.0]), forward)
+    left /= np.linalg.norm(left)
+    up = np.cross(forward, left)
+    up /= np.linalg.norm(up)
+    return _camera_matrix(position, forward, left, up)
+
+
+def _camera_pose_matrix(config: dict[str, Any]) -> np.ndarray:
+    if "target_world" in config:
+        return _look_at_matrix(
+            config["position_world"],
+            config["target_world"],
+            config.get("up_hint_world", (0.0, 0.0, 1.0)),
+        )
+    return _camera_matrix(
+        config["position_world"],
+        config["forward_world"],
+        config["left_world"],
+        config["up_world"],
+    )
+
+
 class FlexivEmbodimentSmoke(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
+    _GUI_VIEWER_FOVY_DEG = 50.0
 
-    def __init__(self, *, gui: bool = False, seed: int = 0, timestep: float | None = None, headless: bool | None = None):
+    def __init__(
+        self,
+        *,
+        gui: bool = False,
+        seed: int = 0,
+        timestep: float | None = None,
+        headless: bool | None = None,
+        viewer_panels: bool = False,
+    ):
         super().__init__()
         self.gui = bool(gui)
+        self.viewer_panels = bool(viewer_panels)
         self.seed_value = int(seed)
         self.rng = np.random.default_rng(self.seed_value)
         self.headless = not self.gui if headless is None else bool(headless)
@@ -68,6 +122,7 @@ class FlexivEmbodimentSmoke(gym.Env):
         self.home_pose = yaml.safe_load((ASSET_ROOT / "home_pose.yaml").read_text(encoding="utf-8"))
         self.left_base_world = _pose_from_config(self.geometry["left_base_pose_world"])
         self.right_base_world = _pose_from_config(self.geometry["right_base_pose_world"])
+        self._viewer_imgui_ini_path: Path | None = None
 
         self.engine = sapien.Engine()
         self.renderer = sapien.SapienRenderer()
@@ -82,6 +137,7 @@ class FlexivEmbodimentSmoke(gym.Env):
         self.scene.add_directional_light([0.0, 0.5, -1.0], [0.8, 0.8, 0.8], shadow=True)
         self.scene.add_point_light([1.0, -0.8, 2.0], [1.0, 1.0, 1.0], shadow=True)
         self._build_table()
+        self.rack = self._load_rack()
         self.left_articulation = self._load_articulation("left.urdf", self.left_base_world)
         self.right_articulation = self._load_articulation("right.urdf", self.right_base_world)
         self.left_arm = self._make_arm("left", self.left_articulation)
@@ -91,11 +147,140 @@ class FlexivEmbodimentSmoke(gym.Env):
         self.viewer = None
         if self.gui:
             from sapien.utils.viewer import Viewer
+            from sapien.utils.viewer.articulation_window import ArticulationWindow
+            from sapien.utils.viewer.contact_window import ContactWindow
+            from sapien.utils.viewer.control_window import ControlWindow
+            from sapien.utils.viewer.entity_window import EntityWindow
+            from sapien.utils.viewer.path_window import PathWindow
+            from sapien.utils.viewer.render_window import RenderOptionsWindow
+            from sapien.utils.viewer.scene_window import SceneWindow
+            from sapien.utils.viewer.setting_window import SettingWindow
+            from sapien.utils.viewer.transform_window import TransformWindow
 
-            self.viewer = Viewer(self.renderer)
+            class _FlexivControlWindow(ControlWindow):
+                """Use the RMBench viewport bindings for both GUI variants.
+
+                SAPIEN's stock bindings are right-button rotate, middle-button
+                pan, and WASD movement.  The embodiment acceptance GUI uses a
+                conventional inspection mapping instead: left-button rotate,
+                right-button pan, and wheel zoom.  Keyboard movement is
+                intentionally disabled so WASD cannot move the camera while a
+                user is inspecting the fixed home pose.
+                """
+
+                def __init__(self, show_panels: bool):
+                    self._show_panels = bool(show_panels)
+                    super().__init__()
+
+                def get_ui_windows(self):
+                    if not self._show_panels:
+                        return []
+                    return super().get_ui_windows()
+
+                def _handle_click(self):
+                    # The left button is reserved for camera rotation.  Entity
+                    # selection is available through the debug windows when
+                    # needed, but must not steal the viewport gesture.
+                    return None
+
+                def _handle_input_wasd(self):
+                    # Explicitly remove the stock keyboard camera movement.
+                    return None
+
+                def _handle_input_mouse(self):
+                    speed_mod = 0.1 if self.window.shift else 1.0
+
+                    # Left button -> orbit around the fixed workspace center.
+                    # Horizontal motion is reversed while vertical motion
+                    # follows the original SAPIEN direction.
+                    if self.window.mouse_down(0):
+                        x, y = self.window.mouse_delta
+                        if x != 0 or y != 0:
+                            self.arc_camera_controller.rotate_yaw_pitch(
+                                -self.rotate_speed * speed_mod * x,
+                                self.rotate_speed * speed_mod * y,
+                            )
+                            self.viewer.set_camera_pose(self.arc_camera_controller.pose)
+
+                    # Right button -> screen-space pan. Move the orbit center
+                    # together with the camera so the next orbit uses the
+                    # translated workspace point as its pivot.
+                    if self.window.mouse_down(1):
+                        x, y = self.window.mouse_delta
+                        if x != 0 or y != 0:
+                            pose = self.arc_camera_controller.pose
+                            camera_rotation = Rotation.from_quat(
+                                [pose.q[1], pose.q[2], pose.q[3], pose.q[0]]
+                            ).as_matrix()
+                            pan_delta = (
+                                camera_rotation[:, 1] * self.rotate_speed * speed_mod * x
+                                + camera_rotation[:, 2] * self.rotate_speed * speed_mod * y
+                            )
+                            self.arc_camera_controller.set_center(
+                                self.arc_camera_controller.center + pan_delta
+                            )
+                            self.viewer.set_camera_pose(self.arc_camera_controller.pose)
+
+                    # Mouse wheel -> zoom in/out along the optical axis.
+                    wx, wy = self.window.mouse_wheel_delta
+                    wheel = wx if wx != 0 else wy
+                    if wheel != 0:
+                        self.arc_camera_controller.zoom(self.scroll_speed * speed_mod * wheel)
+                        self.viewer.set_camera_pose(self.arc_camera_controller.pose)
+
+                def _handle_input_f(self):
+                    # Keep the orbit center fixed at the workspace center.
+                    return None
+
+            # Never reuse the user-global ~/.sapien/imgui.ini.  A stale
+            # DPI/monitor-specific dock tree is the source of stacked panels.
+            # Viewer writes its canonical default layout to this per-process
+            # path, which is removed by close().
+            fd, ini_path = tempfile.mkstemp(prefix="rmbench_flexiv_imgui_", suffix=".ini")
+            os.close(fd)
+            self._viewer_imgui_ini_path = Path(ini_path)
+            self._viewer_imgui_ini_path.unlink()
+            sapien.render.set_imgui_ini_filename(str(self._viewer_imgui_ini_path))
+
+            plugins = [_FlexivControlWindow(show_panels=self.viewer_panels)]
+            if self.viewer_panels:
+                plugins = [
+                    PathWindow(),
+                    ContactWindow(),
+                    SettingWindow(),
+                    TransformWindow(),
+                    RenderOptionsWindow(),
+                    plugins[0],
+                    SceneWindow(),
+                    EntityWindow(),
+                    ArticulationWindow(),
+                ]
+            self.viewer = Viewer(self.renderer, plugins=plugins)
             self.viewer.set_scene(self.scene)
-            self.viewer.set_camera_xyz(x=0.0, y=-1.6, z=1.45)
-            self.viewer.set_camera_rpy(r=0.0, p=-0.65, y=1.57)
+            if self.viewer.control_window is not None:
+                self.viewer.control_window.show_camera_linesets = False
+            cfg = self.camera_config
+            self.viewer.window.set_camera_parameters(
+                float(cfg["near_m"]), float(cfg["far_m"]), math.radians(self._GUI_VIEWER_FOVY_DEG)
+            )
+            self.viewer.set_camera_pose(
+                sapien.Pose(_camera_pose_matrix(cfg))
+            )
+            # Initialize the orbit controller from the configured head-camera
+            # pose, using the table/workspace center as its fixed pivot.
+            control = self.viewer.control_window
+            if control is not None:
+                orbit_center = np.asarray(self.geometry["workspace_center_world"], dtype=float)
+                camera_position = np.asarray(cfg["position_world"], dtype=float)
+                camera_offset = camera_position - orbit_center
+                horizontal_radius = float(np.linalg.norm(camera_offset[:2]))
+                control.arc_camera_controller.set_center(orbit_center)
+                control.arc_camera_controller.set_yaw_pitch(
+                    float(np.arctan2(-camera_offset[1], -camera_offset[0])),
+                    float(np.arctan2(camera_offset[2], horizontal_radius)),
+                )
+                control.arc_camera_controller.set_zoom(float(np.linalg.norm(camera_offset)))
+                self.viewer.set_camera_pose(control.arc_camera_controller.pose)
         self.action_adapter = FlexivActionAdapter()
         self.left_ik = DampedLeastSquaresIK(self.left_arm, **self._ik_options())
         self.right_ik = DampedLeastSquaresIK(self.right_arm, **self._ik_options())
@@ -124,10 +309,36 @@ class FlexivEmbodimentSmoke(gym.Env):
 
     def _build_table(self) -> None:
         builder = self.scene.create_actor_builder()
-        builder.add_box_collision(half_size=[0.95, 0.70, 0.04])
-        builder.add_box_visual(half_size=[0.95, 0.70, 0.04], material=[0.55, 0.55, 0.55, 1.0])
+        table = self.geometry["table"]
+        half_size = np.asarray(table["half_size_m"], dtype=float)
+        builder.add_box_collision(half_size=half_size.tolist())
+        builder.add_box_visual(half_size=half_size.tolist(), material=[0.55, 0.55, 0.55, 1.0])
         self.table = builder.build_static(name="stage2_table")
-        self.table.set_pose(sapien.Pose([0.0, 0.05, 0.70]))
+        self.table.set_pose(sapien.Pose(table["center_world"]))
+
+    def _load_rack(self):
+        rack_config = self.geometry["raised_base_rack"]
+        rack_path = ASSET_ROOT / rack_config["urdf"]
+        loader = self.scene.create_urdf_loader()
+        loader.fix_root_link = True
+        articulations, actors = loader.load_multiple(str(rack_path))
+        if articulations:
+            rack = articulations[0]
+            rack.set_root_pose(sapien.Pose(rack_config["center_world"]))
+            self._rack_collision_shapes = [
+                shape
+                for link in rack.get_links()
+                for shape in link.get_collision_shapes()
+            ]
+        elif actors:
+            rack = actors[0]
+            rack.set_pose(sapien.Pose(rack_config["center_world"]))
+            rigid_body = rack.find_component_by_type(sapien.physx.PhysxRigidDynamicComponent)
+            rigid_body.set_kinematic(True)
+            self._rack_collision_shapes = rigid_body.get_collision_shapes()
+        else:
+            raise RuntimeError(f"rack URDF contains no loadable object: {rack_path}")
+        return rack
 
     def _load_articulation(self, filename: str, base_pose: RigidPose):
         loader = self.scene.create_urdf_loader()
@@ -154,6 +365,30 @@ class FlexivEmbodimentSmoke(gym.Env):
                     joint.set_drive_property(float(drives["joint_stiffness"]), float(drives["joint_damping"]))
                 else:
                     joint.set_drive_property(float(drives["gripper_stiffness"]), float(drives["gripper_damping"]))
+        self._configure_arm_collision_groups()
+
+    def _configure_arm_collision_groups(self) -> None:
+        """Keep each arm collidable with the static scene but not the other arm.
+
+        The requested 30 cm base spacing plus +/-45 degree roll makes the two
+        URDF base collision meshes overlap slightly. Cross-arm collision would
+        then inject non-realistic impulses into the fixed-root joint drives.
+        """
+        static_group = 1
+        for side_index, arm in enumerate((self.left_arm, self.right_arm), start=1):
+            arm_group = 1 << side_index
+            collision_mask = static_group | arm_group
+            for link in arm.articulation.get_links():
+                for shape in link.get_collision_shapes():
+                    _, _, group2, group3 = shape.get_collision_groups()
+                    shape.set_collision_groups([arm_group, collision_mask, group2, group3])
+
+        # The rack URDF is geometrically in contact with both bases. The robot
+        # roots are fixed to its mounting coordinates, so suppressing the
+        # redundant rack-vs-robot contact prevents solver impulses without
+        # making either base visually float above the platform.
+        for shape in self._rack_collision_shapes:
+            shape.set_collision_groups([8, 8, 0, 0])
 
     def _load_head_camera(self) -> None:
         cfg = self.camera_config
@@ -166,7 +401,7 @@ class FlexivEmbodimentSmoke(gym.Env):
             far=float(cfg["far_m"]),
         )
         self.head_camera.entity.set_pose(
-            sapien.Pose(_camera_matrix(cfg["position_world"], cfg["forward_world"], cfg["left_world"], cfg["up_world"]))
+            sapien.Pose(_camera_pose_matrix(cfg))
         )
         self.static_camera_names = ["head_camera"]
 
@@ -181,9 +416,17 @@ class FlexivEmbodimentSmoke(gym.Env):
         arm.set_gripper(gripper_value)
 
     def home(self, *, settle_steps: int = 240) -> None:
-        self._set_arm_qpos_immediate(self.left_arm, self.home_pose["left"]["qpos"], 1.0)
-        self._set_arm_qpos_immediate(self.right_arm, self.home_pose["right"]["qpos"], 1.0)
+        left_home = self.home_pose["left"]["qpos"]
+        right_home = self.home_pose["right"]["qpos"]
+        self._set_arm_qpos_immediate(self.left_arm, left_home, 1.0)
+        self._set_arm_qpos_immediate(self.right_arm, right_home, 1.0)
         self._settle(settle_steps)
+        # Physics settling is useful for contacts and render stability, but
+        # the public home contract must remain bit-for-bit aligned with the
+        # real runtime home joints. Reassert the commanded home after settling.
+        self._set_arm_qpos_immediate(self.left_arm, left_home, 1.0)
+        self._set_arm_qpos_immediate(self.right_arm, right_home, 1.0)
+        self.scene.update_render()
 
     def _settle(self, steps: int) -> None:
         for _ in range(int(steps)):
@@ -265,18 +508,22 @@ class FlexivEmbodimentSmoke(gym.Env):
         return color, depth
 
     def capture_view(self, name: str) -> tuple[np.ndarray, np.ndarray]:
+        target = self.geometry["workspace_center_world"]
         views = {
-            "front": ([0.0, -1.45, 1.25], [0.0, 0.75, -0.35], [-1.0, 0.0, 0.0], [0.0, 0.35, 0.75]),
-            "side": ([1.55, 0.05, 1.25], [-0.95, 0.0, -0.25], [0.0, -1.0, 0.0], [0.25, 0.0, 0.95]),
-            "top": ([0.0, 0.1, 2.45], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            "front": ([-1.65, target[1], 1.35], target, [0.0, 0.0, 1.0]),
+            "side": ([target[0], 1.80, 1.35], target, [0.0, 0.0, 1.0]),
+            "top": ([target[0], target[1], 2.65], target, [0.0, 1.0, 0.0]),
         }
         if name == "head-camera":
             return self.capture_head()
         if name not in views:
             raise ValueError(f"unknown view {name}")
-        position, forward, left, up = views[name]
+        position, target, up_hint = views[name]
         camera = self.scene.add_camera(name=f"acceptance_{name}", width=320, height=240, fovy=math.radians(45), near=0.05, far=5.0)
-        camera.entity.set_pose(sapien.Pose(_camera_matrix(position, forward, left, up)))
+        camera.entity.set_pose(sapien.Pose(_look_at_matrix(position, target, up_hint)))
+        # Cameras added after the last render update otherwise return the
+        # initialized gray color buffer and an entirely invalid depth image.
+        self.scene.update_render()
         camera.take_picture()
         color = (camera.get_picture("Color") * 255).clip(0, 255).astype(np.uint8)[..., :3]
         depth = (-camera.get_picture("Position")[..., 2] * 1000.0).astype(np.float32)
@@ -309,6 +556,9 @@ class FlexivEmbodimentSmoke(gym.Env):
         if getattr(self, "viewer", None) is not None:
             self.viewer.close()
             self.viewer = None
+        if self._viewer_imgui_ini_path is not None:
+            self._viewer_imgui_ini_path.unlink(missing_ok=True)
+            self._viewer_imgui_ini_path = None
         self.scene = None
         self.renderer = None
         self.engine = None

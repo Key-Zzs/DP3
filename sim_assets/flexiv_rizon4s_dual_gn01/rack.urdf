@@ -1,0 +1,96 @@
+<?xml version="1.0"?>
+<!--
+  Dual Flexiv mounting rack.
+
+  The rack root is placed at world [-0.88, 0.05, 0].  The robot roots are
+  placed at world [-0.88, 0.20, 0.94] and [-0.88, -0.10, 0.94], with roll
+  -45 and +45 degrees respectively.  Each mounting plate has the same roll
+  and its upper face is coincident with the corresponding robot root plane.
+
+  This is intentionally one fixed-root URDF: the vertical center post and
+  the two 45-degree outward braces are one rigid installation fixture.
+-->
+<robot name="flexiv_dual_arm_base_rack">
+  <link name="rack_root">
+    <inertial>
+      <origin xyz="0 0 0.80"/>
+      <mass value="1.0"/>
+      <inertia ixx="1.0" ixy="0" ixz="0" iyy="1.0" iyz="0" izz="1.0"/>
+    </inertial>
+
+    <!-- Floor/table-side foot: the rack is outside the table long edge. -->
+    <visual name="foot_visual">
+      <origin xyz="0 0 0.04"/>
+      <geometry><box size="0.38 0.72 0.08"/></geometry>
+      <material name="rack_aluminum"><color rgba="0.32 0.34 0.37 1.0"/></material>
+    </visual>
+    <collision name="foot_collision">
+      <origin xyz="0 0 0.04"/>
+      <geometry><box size="0.38 0.72 0.08"/></geometry>
+    </collision>
+
+    <!--
+      Central upright.  It stops at the upper inclined-brace connection
+      (z=0.94) and does not protrude above the two robot mounting planes.
+    -->
+    <visual name="center_upright_visual">
+      <origin xyz="0 0 0.51"/>
+      <geometry><box size="0.10 0.10 0.86"/></geometry>
+      <material name="rack_aluminum_upright"><color rgba="0.42 0.44 0.47 1.0"/></material>
+    </visual>
+    <collision name="center_upright_collision">
+      <origin xyz="0 0 0.51"/>
+      <geometry><box size="0.10 0.10 0.86"/></geometry>
+    </collision>
+
+    <!--
+      Outward 45-degree braces.  A box's local z axis is its long axis;
+      rx=-45 sends it toward +y for the left base and rx=+45 sends it toward
+      -y for the right base.  The outer end meets the center of its sloped
+      mounting plate, making the two brackets a true V/outward-eight shape.
+    -->
+    <visual name="left_outward_brace_visual">
+      <origin rpy="-0.7853981633974483 0 0" xyz="0 0.077121 0.857879"/>
+      <geometry><box size="0.14 0.10 0.218248"/></geometry>
+      <material name="rack_aluminum_brace"><color rgba="0.36 0.38 0.41 1.0"/></material>
+    </visual>
+    <collision name="left_outward_brace_collision">
+      <origin rpy="-0.7853981633974483 0 0" xyz="0 0.077121 0.857879"/>
+      <geometry><box size="0.14 0.10 0.218248"/></geometry>
+    </collision>
+    <visual name="right_outward_brace_visual">
+      <origin rpy="0.7853981633974483 0 0" xyz="0 -0.077121 0.857879"/>
+      <geometry><box size="0.14 0.10 0.218248"/></geometry>
+      <material name="rack_aluminum_brace"><color rgba="0.36 0.38 0.41 1.0"/></material>
+    </visual>
+    <collision name="right_outward_brace_collision">
+      <origin rpy="0.7853981633974483 0 0" xyz="0 -0.077121 0.857879"/>
+      <geometry><box size="0.14 0.10 0.218248"/></geometry>
+    </collision>
+
+    <!--
+      Sloped base plates.  The plate center is the robot root minus 6 mm
+      along the root's local z axis; its upper face therefore meets the root
+      plane at exactly the robot base pose.  The plate rolls are deliberately
+      -45/+45, the same signs as the corrected left/right robot roots.
+    -->
+    <visual name="left_sloped_mount_visual">
+      <origin rpy="-0.7853981633974483 0 0" xyz="0 0.154243 0.935757"/>
+      <geometry><box size="0.24 0.24 0.012"/></geometry>
+      <material name="left_mount_plate"><color rgba="0.16 0.17 0.19 1.0"/></material>
+    </visual>
+    <collision name="left_sloped_mount_collision">
+      <origin rpy="-0.7853981633974483 0 0" xyz="0 0.154243 0.935757"/>
+      <geometry><box size="0.24 0.24 0.012"/></geometry>
+    </collision>
+    <visual name="right_sloped_mount_visual">
+      <origin rpy="0.7853981633974483 0 0" xyz="0 -0.154243 0.935757"/>
+      <geometry><box size="0.24 0.24 0.012"/></geometry>
+      <material name="right_mount_plate"><color rgba="0.16 0.17 0.19 1.0"/></material>
+    </visual>
+    <collision name="right_sloped_mount_collision">
+      <origin rpy="0.7853981633974483 0 0" xyz="0 -0.154243 0.935757"/>
+      <geometry><box size="0.24 0.24 0.012"/></geometry>
+    </collision>
+  </link>
+</robot>

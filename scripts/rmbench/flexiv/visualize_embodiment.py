@@ -26,12 +26,23 @@ def main() -> int:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--mode", choices=("home", "joint-sweep", "gripper-cycle", "action-smoke"), default="home")
     parser.add_argument("--view", choices=("front", "side", "top", "head-camera"), default="head-camera")
-    parser.add_argument("--seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--seconds",
+        type=float,
+        default=None,
+        help="bounded GUI runtime; omit to keep the interactive window open until closed",
+    )
+    parser.add_argument("--show-panels", action="store_true", help="enable SAPIEN debug panels")
     args = parser.parse_args()
     if args.gui and args.headless:
         raise SystemExit("choose --gui or --headless")
     try:
-        env = FlexivEmbodimentSmoke(gui=args.gui, seed=0, headless=not args.gui)
+        env = FlexivEmbodimentSmoke(
+            gui=args.gui,
+            seed=0,
+            headless=not args.gui,
+            viewer_panels=args.show_panels,
+        )
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         if "vk::PhysicalDevice" in detail or "Vulkan" in detail:
@@ -56,13 +67,22 @@ def main() -> int:
             ):
                 print(env.apply_action(action))
         if args.gui:
-            deadline = time.monotonic() + max(0.0, args.seconds)
-            while time.monotonic() < deadline:
-                env.render()
-                time.sleep(0.01)
+            if args.seconds is None:
+                print("GUI running; close the SAPIEN window or press Ctrl-C to exit.")
+                while not env.viewer.closed:
+                    env.render()
+            else:
+                deadline = time.monotonic() + max(0.0, args.seconds)
+                while time.monotonic() < deadline and not env.viewer.closed:
+                    env.render()
         else:
             rgb, depth = env.capture_view(args.view)
-            print(f"headless view={args.view} rgb={rgb.shape} depth={depth.shape} depth_finite={np.isfinite(depth).all()}")
+            print(
+                f"headless view={args.view} rgb={rgb.shape} depth={depth.shape} "
+                f"rgb_dynamic_range={int(np.ptp(rgb))} "
+                f"depth_valid_ratio={float(np.mean(depth > 0)):.4f} "
+                f"depth_finite={np.isfinite(depth).all()}"
+            )
     finally:
         env.close()
     return 0

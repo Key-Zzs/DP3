@@ -30,12 +30,14 @@ submodule.
 | Rizon4s arm topology, joint limits, mesh names, flange, TCP links | official description | verified at the pinned commit |
 | GN01 `finger_width_joint` limits and mimic graph | official description | verified; normalized `g=0` is closed and `g=1` is open |
 | Left/right seven-joint home vectors | local real runtime config | copied without serials or network data; verified as source values |
-| Dual base translations, table height, right-arm 180-degree simulation yaw | simulation default | not claimed as real installation geometry |
-| Fixed head-camera pose and D435 intrinsics | simulation default | not present in the real runtime config; not claimed real |
+| Table/rack geometry, 0.30 m base separation, and +/-45-degree x roll | user-specified simulation geometry | implemented as the current station-layout target; still `verified: false` against measured CAD |
+| Fixed head-camera offset and look-at target | user-specified simulation geometry | base midpoint + [0.10, 0, 0.60] m; targets the table center; still `verified: false` |
 | Dynamics, timestep, drive gains, IK tolerances, action limits | simulation default | explicit simulation overrides only |
 
-Real runtime mount angles are not silently promoted to base pose or camera
-extrinsics. Missing physical measurements remain marked `verified: false` in
+The real home vectors are copied exactly from the runtime example and checked
+by the validator. Real runtime mount angles and the user-specified station
+layout are not silently presented as measured CAD extrinsics; missing physical
+measurements remain marked `verified: false` in
 `sim_assets/flexiv_rizon4s_dual_gn01/`.
 
 ## Generated artifacts
@@ -73,6 +75,11 @@ seven active GN01 joints; the retract vector has exactly the same order.
 - `envs/flexiv_embodiment_smoke.py`: no-task, no-reward, no-data smoke
   environment with atomic dual-arm action rejection when either IK solve
   fails.
+- `sim_assets/flexiv_rizon4s_dual_gn01/rack.urdf`: separate fixed-root raised
+  fixture with a center upright, two outward 45-degree braces, and sloped base
+  mounting plates. The arm root poses are fixed to the matching plate planes;
+  rack-vs-arm collision is filtered because the fixed root already represents
+  the mechanical mount.
 
 State field order is:
 
@@ -116,9 +123,10 @@ conda run -n dp3-rmbench python scripts/rmbench/flexiv/capture_acceptance_artifa
   --headless --capture-all --output-dir outputs/rmbench_flexiv_acceptance
 ```
 
-`validate_embodiment.py` checks load, 34D state, 1000-step home stability,
-repeatable reset, all six signed base-frame translation directions, zero
-action, GN01 cycle, head-camera RGB/depth, and contacts. `planner_smoke.py`
+`validate_embodiment.py` checks load, 34D state, exact real home qpos,
+1000-step home stability, repeatable reset, all six signed base-frame
+translation directions, zero action, GN01 cycle, head-camera RGB/depth, and
+contacts. `planner_smoke.py`
 structurally checks both CuRobo configs and loads both URDFs through MPlib;
 CuRobo construction requires an available CUDA device and is recorded as
 `SKIP` when the host has no GPU. No driver error is converted into `PASS`.
@@ -129,6 +137,16 @@ The GUI command is:
 conda run -n dp3-rmbench python scripts/rmbench/flexiv/visualize_embodiment.py \
   --gui --mode home --view head-camera
 ```
+
+The GUI stays open until the window is closed or `Ctrl-C` is pressed. Right
+drag rotates, middle drag pans, and the wheel zooms. `--show-panels` enables
+the debug panels using a fresh per-process layout, avoiding stale global DPI or
+monitor dock state.
+The camera acceptance also rejects a flat gray RGB buffer or an all-invalid
+depth buffer, so a correctly shaped but empty image cannot be reported as a
+visual pass. The bounded front, side, and top captures build their camera
+frames with a look-at target and update the SAPIEN render scene after creating
+each temporary camera.
 
 It requires a working Vulkan/display stack. If unavailable, run the headless
 commands and report the exact driver error; the camera result must remain

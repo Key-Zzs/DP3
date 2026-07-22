@@ -2,17 +2,19 @@ schema: rmbench_fixed_head_camera_mount_v1
 name: head_camera
 frame: world
 type: D435
-position_world: [0.0, -1.20, 2.05]
-forward_world: [0.0, 0.78, -0.63]
-up_world: [0.0, 0.63, 0.78]
-left_world: [-1.0, 0.0, 0.0]
+base_midpoint_world: [-0.88, 0.05, 0.94]
+offset_from_base_midpoint_m: [0.10, 0.0, 0.60]
+position_world: [-0.78, 0.05, 1.54]
+target_world: [0.0, 0.05, 0.74]
+up_hint_world: [0.0, 0.0, 1.0]
+orientation_source: look_at_target_world
 fovy_deg: 37.0
 resolution: [320, 240]
 near_m: 0.05
 far_m: 5.0
-source: simulation_default
+source: user_specified_simulation_geometry
 verified: false
-note: Fixed visualization mount; no camera extrinsic was present in the real runtime config.
+note: Camera is 10 cm forward along world x and 60 cm above the dual-base midpoint; look-at targets the table center.
 enabled_cameras:
   - head_camera
 wrist_cameras_enabled: false

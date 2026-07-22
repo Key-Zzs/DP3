@@ -34,6 +34,16 @@ def run(out_dir: Path, *, stability_steps: int, repeated_resets: int) -> dict:
         checks.append(result("PASS" if initial.shape == (34,) else "FAIL", f"state shape={initial.shape}", name="state_contract"))
         env.home(settle_steps=240)
         home_q = np.r_[env.left_arm.arm_qpos(), env.right_arm.arm_qpos()]
+        expected_home_q = np.r_[env.home_pose["left"]["qpos"], env.home_pose["right"]["qpos"]]
+        home_error = float(np.max(np.abs(home_q - expected_home_q)))
+        checks.append(
+            result(
+                "PASS" if home_error < 1e-5 else "FAIL",
+                f"home qpos matches real runtime contract max error={home_error:.6g} rad",
+                name="real_home_pose",
+                max_home_q_error_rad=home_error,
+            )
+        )
         for _ in range(stability_steps):
             env.scene.step()
         final_q = np.r_[env.left_arm.arm_qpos(), env.right_arm.arm_qpos()]
@@ -72,8 +82,28 @@ def run(out_dir: Path, *, stability_steps: int, repeated_resets: int) -> dict:
                 gripper_values.append({"side": side, "value": value, "base_target": targets[arm.gripper.base_joint]})
         checks.append(result("PASS", "GN01 normalized 0/0.5/1/0 cycle mapped from URDF limits", name="gripper_contract", values=gripper_values))
         rgb, depth = env.capture_head()
-        camera_ok = rgb.shape[-1] == 3 and depth.shape == rgb.shape[:2] and np.isfinite(depth).all()
-        checks.append(result("PASS" if camera_ok else "FAIL", f"head RGB={rgb.shape}, depth={depth.shape}", name="head_camera"))
+        rgb_dynamic_range = int(np.ptp(rgb)) if rgb.size else 0
+        depth_valid_ratio = float(np.mean(depth > 0)) if depth.size else 0.0
+        camera_ok = (
+            rgb.shape[-1] == 3
+            and depth.shape == rgb.shape[:2]
+            and np.isfinite(depth).all()
+            and rgb_dynamic_range > 5
+            and depth_valid_ratio > 0.01
+        )
+        camera_detail = (
+            f"head RGB={rgb.shape}, depth={depth.shape}, "
+            f"rgb_dynamic_range={rgb_dynamic_range}, depth_valid_ratio={depth_valid_ratio:.4f}"
+        )
+        checks.append(
+            result(
+                "PASS" if camera_ok else "FAIL",
+                camera_detail,
+                name="head_camera",
+                rgb_dynamic_range=rgb_dynamic_range,
+                depth_valid_ratio=depth_valid_ratio,
+            )
+        )
         contacts = len(env.scene.get_contacts())
         checks.append(result("PASS", f"home contact records={contacts}", name="contacts", contact_count=contacts))
         report = {"status": "PASS" if all(item["status"] == "PASS" for item in checks) else "FAIL", "checks": checks, "state_field_names": env.state_adapter.field_names(), "action_field_names": ["left_delta_xyz", "left_delta_rotvec", "right_delta_xyz", "right_delta_rotvec", "left_gripper_cmd", "right_gripper_cmd"]}

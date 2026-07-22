@@ -87,6 +87,7 @@ def main() -> int:
                 write_depth(out_dir / "head_camera_depth.png", depth)
                 visibility = {
                     "depth_valid_ratio": float(np.mean(depth > 0)),
+                    "rgb_dynamic_range": int(np.ptp(rgb)),
                     "rgb_shape": list(rgb.shape),
                     "depth_shape": list(depth.shape),
                     "camera_frame": "world/head_camera",
