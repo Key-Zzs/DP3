@@ -217,10 +217,13 @@ class Base_Task(gym.Env):
         # give renderer to sapien sim
         self.engine.set_renderer(self.renderer)
 
-        sapien.render.set_camera_shader_dir("rt")
+        # The upstream RT shader can deadlock intermittently on RTX 50-series
+        # GPUs during long camera capture. The raster shader still exposes the
+        # Color and Position buffers required by RGB and point-cloud recording.
+        sapien.render.set_camera_shader_dir("default")
         sapien.render.set_ray_tracing_samples_per_pixel(32)
         sapien.render.set_ray_tracing_path_depth(8)
-        sapien.render.set_ray_tracing_denoiser("oidn")
+        sapien.render.set_ray_tracing_denoiser("none")
 
         # declare sapien scene
         scene_config = sapien.SceneConfig()

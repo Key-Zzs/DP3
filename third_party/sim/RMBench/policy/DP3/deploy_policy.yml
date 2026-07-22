@@ -8,7 +8,7 @@ instruction_type: unseen
 
 # Add Parameters You Need
 config_name: robot_dp3
-checkpoint_num: 3000
+checkpoint_num: 400
 dp3_task: demo_task
 expert_data_num: null
 use_rgb: false

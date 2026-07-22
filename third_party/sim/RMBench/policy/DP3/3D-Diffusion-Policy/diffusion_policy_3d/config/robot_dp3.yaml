@@ -102,11 +102,11 @@ training:
   resume: True
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 3000
+  num_epochs: 400
   gradient_accumulate_every: 1
   use_ema: True
-  rollout_every: 200
-  checkpoint_every: 3000
+  rollout_every: 50
+  checkpoint_every: 100
   val_every: 50
   sample_every: 20
   max_train_steps: null
@@ -116,9 +116,10 @@ training:
 logging:
   group: ${exp_name}
   id: null
+  entity: key_z-bjtu
+  project: RoboTwin
   mode: online
   name: ${exp_name}
-  project: RoboTwin
   resume: true
   tags:
   - RoboTwin
