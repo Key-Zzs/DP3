@@ -1,0 +1,12 @@
+schema: rmbench_flexiv_embodiment_manifest_v1
+description_source: third_party/sim/flexiv_description
+official_branch: humble-v1
+official_commit: 92ef7865d76585e6e08d291bdfe652d32f7740f4
+robot_type_left: Rizon4s
+robot_type_right: Rizon4s
+gripper_left: Flexiv-GN01
+gripper_right: Flexiv-GN01
+simulation_instance_names:
+  left: SIM-RIZON4S-LEFT
+  right: SIM-RIZON4S-RIGHT
+generated_runtime_manifest: third_party/sim/RMBench/assets/embodiments/flexiv-rizon4s-dual-gn01/generation_manifest.json

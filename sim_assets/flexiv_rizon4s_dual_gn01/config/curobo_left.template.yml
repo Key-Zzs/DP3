@@ -1,0 +1,20 @@
+# Source template for the generated single-articulation CuRobo config.
+# Paths stay relative to this file and the cspace is resolved from the URDF.
+robot_cfg:
+  kinematics:
+    use_usd_kinematics: false
+    urdf_path: ../left.urdf
+    asset_root_path: null
+    base_link: SIM-RIZON4S-LEFT_base_link
+    ee_link: SIM-RIZON4S-LEFT_grav_tcp
+    collision_link_names: []
+    mesh_link_names: []
+    cspace:
+      joint_names: []
+      retract_config: []
+      null_space_weight: []
+      cspace_distance_weight: []
+      max_acceleration: 15.0
+      max_jerk: 500.0
+planner:
+  frame_bias: [0.0, 0.0, 0.0]

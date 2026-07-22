@@ -1,0 +1,13 @@
+# Source template. The generator writes the resolved RMBench config.yml files
+# into the ignored runtime bundle; edit the YAML sources, then regenerate.
+urdf_path: left.urdf
+srdf_path: null
+joint_stiffness: 1200
+joint_damping: 80
+gripper_stiffness: 300
+gripper_damping: 20
+planner: mplib_RRT
+dual_arm: false
+static_camera_list: [head_camera]
+# arm_joints_name, gripper_name, homestate, and move_group are resolved from
+# the pinned official xacro output by generate_embodiment.py.

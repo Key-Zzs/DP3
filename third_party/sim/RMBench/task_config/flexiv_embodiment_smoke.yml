@@ -1,0 +1,16 @@
+schema: rmbench_flexiv_embodiment_smoke_v1
+seed: 0
+render_freq: 0
+fixed_timestep_s: 0.004166666666666667
+embodiment: [flexiv-rizon4s-dual-gn01-left, flexiv-rizon4s-dual-gn01-right, 0.90]
+camera:
+  enabled: [head_camera]
+  collect_wrist_camera: false
+  randomization: false
+acceptance:
+  home_settle_steps: 240
+  stability_steps: 1000
+  repeated_resets: 3
+  joint_sweep_amplitude_rad: 0.12
+  action_xyz_limit_m: 0.02
+  action_rotvec_limit_rad: 0.04

@@ -1,0 +1,24 @@
+schema: rmbench_flexiv_simulation_overrides_v1
+physics:
+  timestep_s: 0.004166666666666667
+  static_friction: 0.5
+  dynamic_friction: 0.5
+  restitution: 0.0
+drives:
+  joint_stiffness: 1200.0
+  joint_damping: 80.0
+  gripper_stiffness: 300.0
+  gripper_damping: 20.0
+  ik_damping: 0.0001
+  ik_max_iterations: 80
+  ik_position_tolerance_m: 0.0005
+  ik_rotation_tolerance_rad: 0.005
+limits:
+  action_xyz_norm_m: 0.02
+  action_rotvec_norm_rad: 0.04
+  smoke_xyz_norm_m: 0.005
+  smoke_rotvec_norm_rad: 0.01
+collision_disable_pairs: []
+source: simulation_default
+verified: false
+note: Dynamics overrides are simulation-only and are not claimed as real Flexiv parameters.

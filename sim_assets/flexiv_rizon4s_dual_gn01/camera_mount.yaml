@@ -1,0 +1,19 @@
+schema: rmbench_fixed_head_camera_mount_v1
+name: head_camera
+frame: world
+type: D435
+position_world: [0.0, -1.20, 2.05]
+forward_world: [0.0, 0.78, -0.63]
+up_world: [0.0, 0.63, 0.78]
+left_world: [-1.0, 0.0, 0.0]
+fovy_deg: 37.0
+resolution: [320, 240]
+near_m: 0.05
+far_m: 5.0
+source: simulation_default
+verified: false
+note: Fixed visualization mount; no camera extrinsic was present in the real runtime config.
+enabled_cameras:
+  - head_camera
+wrist_cameras_enabled: false
+randomization_enabled: false

@@ -1,0 +1,18 @@
+schema: rmbench_flexiv_installation_geometry_v1
+world_frame: world
+table_height_m: 0.74
+workspace_center_world: [0.0, 0.05, 0.90]
+base_separation_m: 0.90
+left_base_pose_world:
+  position: [-0.45, -0.15, 0.74]
+  rpy_rad: [0.0, 0.0, 0.0]
+  source: simulation_default
+  verified: false
+  note: No real dual-base translation was present in the checked-in/private runtime config.
+right_base_pose_world:
+  position: [0.45, -0.15, 0.74]
+  rpy_rad: [0.0, 0.0, 3.141592653589793]
+  source: simulation_default
+  verified: false
+  note: No real dual-base translation was present in the checked-in/private runtime config.
+base_yaw_convention: positive z yaw in world frame

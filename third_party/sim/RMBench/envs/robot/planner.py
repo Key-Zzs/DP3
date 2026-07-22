@@ -274,6 +274,21 @@ except Exception as e:
     print('[planner.py]: Something wrong happened when importing CuroboPlanner! Please check if Curobo is installed correctly. If the problem still exists, you can install Curobo from https://github.com/NVlabs/curobo manually.')
     print('Exception traceback:')
     traceback.print_exc()
+    _CUROBO_IMPORT_ERROR = e
+
+    class CuroboPlanner:
+        """Import-compatible placeholder when CUDA-only CuRobo is unavailable.
+
+        RMBench task modules should remain importable for CPU-only contract
+        checks. Actual planner construction still fails explicitly with the
+        original host/import cause.
+        """
+
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "CuRoboPlanner is unavailable in this host environment; "
+                f"original error: {_CUROBO_IMPORT_ERROR}"
+            ) from _CUROBO_IMPORT_ERROR
 
 
 # ********************** MplibPlanner **********************

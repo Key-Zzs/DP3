@@ -12,3 +12,15 @@ ARX-X5:
 
 ur5-wsg:
   file_path: "./assets/embodiments/ur5-wsg"
+
+flexiv-rizon4s-dual-gn01:
+  file_path: "./assets/embodiments/flexiv-rizon4s-dual-gn01/"
+
+# RMBench's legacy Robot loader consumes two separate articulation directories
+# for the stable two-single-arm path. Both entries are generated from the same
+# official source and share the top-level Stage 2 runtime bundle.
+flexiv-rizon4s-dual-gn01-left:
+  file_path: "./assets/embodiments/flexiv-rizon4s-dual-gn01/left/"
+
+flexiv-rizon4s-dual-gn01-right:
+  file_path: "./assets/embodiments/flexiv-rizon4s-dual-gn01/right/"

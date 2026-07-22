@@ -1,0 +1,11 @@
+schema: rmbench_flexiv_home_pose_v1
+left:
+  qpos: [-0.17, -0.89, 0.13, 1.50, 0.85, 0.56, -0.71]
+  source: real_config
+  verified: true
+  note: Copied from the local Flexiv runtime home-joint configuration; no serial/IP values are included.
+right:
+  qpos: [0.27, -0.91, 0.06, 1.82, -1.04, 0.56, 1.17]
+  source: real_config
+  verified: true
+  note: Copied from the local Flexiv runtime home-joint configuration; no serial/IP values are included.
